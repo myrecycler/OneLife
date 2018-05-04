@@ -3349,7 +3349,9 @@ static char addHeldToContainer( LiveObject *inPlayer,
     if( isGrave( target ) ) {
         return false;
         }
-    
+    if( targetObj->slotsLocked ) {
+        return false;
+        }
 
     float slotSize =
         targetObj->slotSize;
@@ -3533,6 +3535,10 @@ char removeFromContainerToHold( LiveObject *inPlayer,
                             
         if( target != 0 ) {
                             
+            if( target > 0 && getObject( target )->slotsLocked ) {
+                return false;
+                }
+
             int numIn = 
                 getNumContained( inContX, inContY );
                                 
@@ -4186,8 +4192,8 @@ int main() {
         SettingsManager::getIntSetting( "nextPlayerID", 2 );
 
 
-    // make backup and delete old backup every three days
-    AppLog::setLog( new FileLog( "log.txt", 259200 ) );
+    // make backup and delete old backup every two days
+    AppLog::setLog( new FileLog( "log.txt", 172800 ) );
 
     AppLog::setLoggingLevel( Log::DETAIL_LEVEL );
     AppLog::printAllMessages( true );

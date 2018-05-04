@@ -3,8 +3,13 @@ This file only list changes to game code.  Changes to content can be found here:
 http://onehouronelife.com/updateLog.php
 
 
+Server Fixes:
 
-Version 81    ???
+--Whoops, forgot to commit/push changes to transition bank.  Bug city on live
+  servers.
+
+
+Version 90    2018-May-3 
 
 --Fixed scene editor to allow replacement of shoes.
 
@@ -12,6 +17,7 @@ Version 81    ???
 
 --Fixed stuck hint sheet from last object when you pick up an object that has
   no transitions.
+
 
 
 
@@ -74,6 +80,9 @@ Server Fixes:
   actor/target use chance through category transitions and generic use
   transitions.  Fixes jasonrohrer/OneLifeData7#7 
 
+--Support for containers with locked slots (nothing can be added or removed).
+
+--Server log.txt backup cycle two days instead of three.  Logs were too big.
 
 
 
