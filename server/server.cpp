@@ -971,8 +971,10 @@ static void deleteMembers( FreshConnection *inConnection ) {
     delete inConnection->sock;
     delete inConnection->sockBuffer;
     
-    delete [] inConnection->sequenceNumberString;
-
+    if( inConnection->sequenceNumberString != NULL ) {    
+        delete [] inConnection->sequenceNumberString;
+        }
+    
     if( inConnection->ticketServerRequest != NULL ) {
         delete inConnection->ticketServerRequest;
         }
@@ -2380,8 +2382,6 @@ static void recomputeHeatMap( LiveObject *inPlayer ) {
             }
         }
     
-    printf( "\n###### %d in airspace\n\n", numInAirspace );
-
     
     float rBoundarySum = 0;
     int rBoundarySize = 0;
@@ -2451,8 +2451,6 @@ static void recomputeHeatMap( LiveObject *inPlayer ) {
     
 
 
-    printf( "Boundary contains %d tiles with average r of %f\n", rBoundarySize,
-            rBoundaryAverage );
 
     float airSpaceHeatSum = 0;
     
@@ -2472,10 +2470,6 @@ static void recomputeHeatMap( LiveObject *inPlayer ) {
 
     float containedAirSpaceHeatVal = airSpaceHeatVal * rBoundaryAverage;
     
-    printf( "Total heat in airspace = %f, spread over %d tiles = %f, "
-            "insulated by %f = %f\n",
-            airSpaceHeatSum, numInAirspace, airSpaceHeatVal,
-            rBoundaryAverage, containedAirSpaceHeatVal );
 
 
     float radiantAirSpaceHeatVal = 0;
@@ -2504,8 +2498,6 @@ static void recomputeHeatMap( LiveObject *inPlayer ) {
             }
         }
     
-    printf( "%d radiant heat sources in airspace (total = %f)\n", 
-            numRadiantHeatSources, radiantAirSpaceHeatVal );
 
     float biomeHeatWeight = 1;
     float radiantHeatWeight = 1;
@@ -2548,7 +2540,7 @@ static void recomputeHeatMap( LiveObject *inPlayer ) {
         biomeHeatWeight * biomeHeat +
         constHeatValue;
 
-    inPlayer->biomeHeat = biomeHeat;
+    inPlayer->biomeHeat = biomeHeat + constHeatValue;
     }
 
 
@@ -7708,6 +7700,9 @@ int main() {
                             
                             delete nextConnection->ticketServerRequest;
                             nextConnection->ticketServerRequest = NULL;
+
+                            delete [] nextConnection->sequenceNumberString;
+                            nextConnection->sequenceNumberString = NULL;
                             
                             if( nextConnection->twinCode != NULL
                                 && 
@@ -7727,8 +7722,7 @@ int main() {
                                     nextConnection->tutorialNumber,
                                     nextConnection->curseStatus );
                                 }
-                            
-                            delete [] nextConnection->sequenceNumberString;
+                                                        
                             newConnections.deleteElement( i );
                             i--;
                             }
@@ -7934,7 +7928,12 @@ int main() {
                                     
                                     delete nextConnection->ticketServerRequest;
                                     nextConnection->ticketServerRequest = NULL;
-                            
+                                    
+                                    delete [] 
+                                        nextConnection->sequenceNumberString;
+                                    nextConnection->sequenceNumberString = NULL;
+
+
                                     if( nextConnection->twinCode != NULL
                                         && 
                                         nextConnection->twinCount > 0 ) {
@@ -7953,9 +7952,7 @@ int main() {
                                             nextConnection->tutorialNumber,
                                             nextConnection->curseStatus );
                                         }
-                                    
-                                    delete [] 
-                                        nextConnection->sequenceNumberString;
+                                                                        
                                     newConnections.deleteElement( i );
                                     i--;
                                     }
@@ -12981,9 +12978,22 @@ int main() {
                 continue;
                 }
             
+            // in case we cross a biome boundary since last time
+            // there will be thermal shock that will take them to
+            // other side of target temp.
+            // 
+            // but never make them more comfortable (closer to
+            // target) then they were before
+            float oldDiffFromTarget = 
+                targetHeat - nextPlayer->bodyHeat;
+
+
             
             // body produces its own heat
-            nextPlayer->bodyHeat += 0.25;
+            // but only in a cold env
+            if( nextPlayer->envHeat < targetHeat ) {
+                nextPlayer->bodyHeat += 0.25;
+                }
 
             nextPlayer->bodyHeat += computeClothingHeat( nextPlayer );
 
@@ -13044,6 +13054,24 @@ int main() {
                     if( nextPlayer->fever == 0 ) {
                         nextPlayer->bodyHeat = 
                             targetHeat - clothingLeak * biomeDiffFromTarget;
+                        
+                        float newDiffFromTarget =
+                            targetHeat - nextPlayer->bodyHeat;
+                        
+                        float oldAbs = fabs( oldDiffFromTarget );
+                        
+                        if( fabs( newDiffFromTarget ) < 
+                            oldAbs ) {
+                            // they used crossing boundary to become more
+                            // comfortable
+                            
+                            // force them to be no more comfortable than
+                            // they used to be
+                            nextPlayer->bodyHeat = 
+                                targetHeat - 
+                                sign( newDiffFromTarget ) * oldAbs;
+                            }
+
                         }
                     else {
                         // direct shock, as if unclothed

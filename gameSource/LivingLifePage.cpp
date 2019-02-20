@@ -66,7 +66,7 @@ extern Font *pencilErasedFont;
 
 
 // to make all erased pencil fonts lighter
-static float pencilErasedFontExtraFade = 0.75;
+static float pencilErasedFontExtraFade = 0.2;
 
 
 extern doublePair lastScreenViewCenter;
@@ -7378,7 +7378,11 @@ void LivingLifePage::draw( doublePair inViewCenter,
             
 
             setDrawColor( 0, 0, 0, 1.0f );
-            double lineSpacing = handwritingFont->getFontHeight() / 2 + ( 5 * gui_fov_effective_scale );
+
+            //double lineSpacing = handwritingFont->getFontHeight() / 2 + ( 5 * gui_fov_effective_scale );
+
+            double lineSpacing = handwritingFont->getFontHeight() + 5;
+
             
             int numLines;
             

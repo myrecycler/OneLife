@@ -530,7 +530,7 @@ void initDrawString( int inWidth, int inHeight ) {
     toggleMipMapMinFilter( true );
     toggleTransparentCropping( true );
     
-    mainFont = new Font( getFontTGAFileName(), 6, 16, false, 16 );
+    mainFont = new Font( getFontTGAFileName(), 6, 16, false, 32 );
     mainFont->setMinimumPositionPrecision( 1 );
 
     setViewCenterPosition( lastScreenViewCenter.x, lastScreenViewCenter.y );
@@ -622,10 +622,10 @@ void initFrameDrawer( int inWidth, int inHeight, int inTargetFrameRate,
     
     
     
-    mainFontReview = new Font( getFontTGAFileName(), 4, 8, false, 16 );
+    mainFontReview = new Font( getFontTGAFileName(), 4, 8, false, 32 );
     mainFontReview->setMinimumPositionPrecision( 1 );
 
-    mainFontFixed = new Font( getFontTGAFileName(), 6, 16, true, 16 );
+    mainFontFixed = new Font( getFontTGAFileName(), 6, 16, true, 32 );
     numbersFontFixed = new Font( getFontTGAFileName(), 6, 16, true, 16, 16 );
     
     mainFontFixed->setMinimumPositionPrecision( 1 );
