@@ -58,3 +58,4 @@ server/serverCodeVersionNumber.txt
 gameSource/icon.ico
 gameSource/icon.rc
 gameSource/OneLife.exe
+gameSource/graphics/*.tga
