@@ -45,6 +45,9 @@ static SimpleVector<SoundLoadingRecord> loadingSounds;
 
 static SimpleVector<int> loadedSounds;
 
+static char *loadingFailureFileName = NULL;
+
+
 
 static int sampleRate = 44100;
 
@@ -600,6 +603,11 @@ static void freeSoundRecord( int inID ) {
 
 
 void freeSoundBank() {
+
+    if( loadingFailureFileName != NULL ) {
+        delete [] loadingFailureFileName;
+        }
+
     endMultiConvolution( &eqConvolution );
 
     for( int i=0; i<mapSize; i++ ) {
@@ -617,6 +625,21 @@ void freeSoundBank() {
         }
 
     delete [] idMap;
+    }
+
+
+
+static void setLoadingFailureFileName( char *inNewFileName ) {
+    if( loadingFailureFileName != NULL ) {
+        delete [] loadingFailureFileName;
+        }
+    loadingFailureFileName = inNewFileName;
+    }
+
+
+
+char *getSoundBankLoadFailure() {
+    return loadingFailureFileName;
     }
 
 
@@ -642,10 +665,17 @@ void stepSoundBank() {
             if( dataSound == NULL ) {
                 printf( "Reading sound data from file failed, sound ID %d\n",
                         loadingR->soundID );
+                
+                setLoadingFailureFileName(
+                        autoSprintf( "sounds/%d.aiff", loadingR->soundID ) );
                 }
             else if( dataReverb == NULL ) {
                 printf( "Reading reverb data from cache failed, sound ID %d\n",
                         loadingR->soundID );
+                
+                setLoadingFailureFileName(
+                    autoSprintf( "reverbCache/%d.aiff", 
+                                     loadingR->soundID ) );
                 }
             else {
                 
@@ -812,9 +842,9 @@ static double sigmoidF( double inDstance ) {
 
 
 
-
-void playSound( SoundUsage inUsage,
-                doublePair inVectorFromCameraToSoundSource ) {
+// returns true if sound should play
+static char getVolumeAndPan( doublePair inVectorFromCameraToSoundSource,
+                             double *outVolume, double *outPan ) {
         
     double d = length( inVectorFromCameraToSoundSource );
     
@@ -838,9 +868,9 @@ void playSound( SoundUsage inUsage,
     // which are audible
     volumeScale = sigmoidF( d );
     
-    if( volumeScale < 0 ) {
+    if( volumeScale <= 0 ) {
         // don't play sound at all
-        return;
+        return false;
         }
     if( volumeScale > 1 ) {
         volumeScale = 1;
@@ -863,6 +893,28 @@ void playSound( SoundUsage inUsage,
     // between 3 and 13
     xPan += 3;
 
+
+    *outVolume = volumeScale;
+    *outPan = xPan / 16.0;
+
+    return true;
+    }
+
+
+
+void playSound( SoundUsage inUsage,
+                doublePair inVectorFromCameraToSoundSource ) {
+
+    double volume, pan;
+    
+    char shouldPlay = 
+        getVolumeAndPan( inVectorFromCameraToSoundSource, &volume, &pan );
+
+    if( ! shouldPlay ) {
+        // skip sound
+        return;
+        }
+
     // if we treat it as going from 0 to 16, we avoid hard left and right stereo
     // even at the edge of the screen
     
@@ -879,15 +931,36 @@ void playSound( SoundUsage inUsage,
     double reverbContstant = 0.1;
     
     double reverbMix = 
-        ( 1.0 - reverbContstant ) * ( 1.0 - volumeScale ) + 
+        ( 1.0 - reverbContstant ) * ( 1.0 - volume ) + 
         reverbContstant;
 
     SoundUsagePlay p = playRandom( inUsage );
 
-    playSound( p.id, volumeScale * p.volume, xPan / 16.0,
+    playSound( p.id, volume * p.volume, pan,
                reverbMix );
     }
 
+
+
+void playSound( SoundSpriteHandle inSoundSprite,
+                double inVolumeTweak,
+                doublePair inVectorFromCameraToSoundSource ) {
+    double volume, pan;
+
+    char shouldPlay = 
+        getVolumeAndPan( inVectorFromCameraToSoundSource, &volume, &pan );
+
+    
+    if( ! shouldPlay ) {
+        // skip sound
+        return;
+        }
+
+    playSoundSprite( inSoundSprite,
+                     inVolumeTweak * soundEffectsLoudness * 
+                     volume * playedSoundVolumeScale, 
+                     pan );
+    }
 
 
     

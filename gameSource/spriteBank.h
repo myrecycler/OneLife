@@ -2,6 +2,9 @@
 #define SPRITE_BANK_INCLUDED
 
 
+#include "FloatRGB.h"
+
+
 #include "minorGems/game/gameGraphics.h"
 
 
@@ -67,6 +70,9 @@ float initSpriteBankStep();
 void initSpriteBankFinish();
 
 
+char isSpriteBankLoaded();
+
+
 // can only be called after bank init is complete
 int getMaxSpriteID();
 
@@ -79,11 +85,20 @@ void freeSpriteBank();
 void stepSpriteBank();
 
 
+// returns NULL if asynchronous loading process hasn't failed
+// returns internally-allocated string (destroyed internally) if
+//    loading process fails.  String is name of file that failed to load
+char *getSpriteBankLoadFailure();
+
+
 
 SpriteRecord *getSpriteRecord( int inID );
 
 
 char getUsesMultiplicativeBlending( int inID );
+
+// not destroyed by caller
+char *getSpriteTag( int inID );
 
 
 SpriteHandle getSprite( int inID );
@@ -113,12 +128,16 @@ int addSprite( const char *inTag, SpriteHandle inSprite,
 // bakes multiple sprite layers into a single sprite and saves it in the bank
 // returns the new ID
 // does NOT work for multiplicative blending sprites
+// does NOT work for sprite rotations that aren't in increments of 90 degrees
+// (0.25, 0.5, 0.75, 1.0 radians)
 int bakeSprite( const char *inTag,
                 int inNumSprites,
                 int *inSpriteIDs,
                 // offset of each sprite center relative to center point
                 doublePair *inSpritePos,
-                char *inSpriteHFlips );
+                double *inSpriteRot,
+                char *inSpriteHFlips,
+                FloatRGB *inSpriteColors );
 
 
                 

@@ -7,6 +7,7 @@
 #include "minorGems/util/SimpleVector.h"
 
 #include "objectBank.h"
+#include "emotion.h"
 
 
 typedef enum AnimType {
@@ -156,7 +157,8 @@ typedef struct LayerSwapRecord {
 
 
 
-AnimationRecord *copyRecord( AnimationRecord *inRecord );
+AnimationRecord *copyRecord( AnimationRecord *inRecord, 
+                             char inCountLiveSoundUses = true );
 
 // should only be called on results of copyRecord and NOT
 // on results of getAnimation
@@ -164,7 +166,8 @@ void freeRecord( AnimationRecord *inRecord );
 
 
 
-SoundAnimationRecord copyRecord( SoundAnimationRecord inRecord );
+SoundAnimationRecord copyRecord( SoundAnimationRecord inRecord, 
+                                 char inCountLiveSoundUses = true );
 
 // takes pointer, but DOES NOT free on heap
 // meant to operate on pointer to a record on the stack or 
@@ -266,6 +269,18 @@ typedef struct ObjectAnimPack {
         // can be NULL if there are none contained
         int *inContainedIDs;
         SimpleVector<int> *inSubContained;
+        
+        Emotion *setEmot;
+
+        // can be added by caller after this structure
+        // is returned by drawObjectAnimPacked
+        // set to 0 by default
+        // if added, by caller, drawObjectAnim will draw this held
+        // item on top of animating object
+        // NOTE that only basic drawing support is implementef for
+        // this held id (meant for held wounds of babies, no contained
+        // items, no animation, no rideable objects)
+        int additionalHeldID;
     } ObjectAnimPack;
 
 
@@ -425,6 +440,16 @@ void performLayerSwaps( int inObjectID,
 
 
 char isSoundUsedByAnim( int inSoundID );
+
+
+// sets emotion for subsequent drawObjectAnim calls, or NULL for no emotion
+void setAnimationEmotion( Emotion *inEmotion );
+
+
+// sets fade values for clothing highlights of next drawn person
+// or NULL for no clothing highlights
+// Copied internally.
+void setClothingHighlightFades( float *inFades );
 
 
 

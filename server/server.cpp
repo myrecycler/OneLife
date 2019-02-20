@@ -33,6 +33,7 @@
 #include "map.h"
 #include "../gameSource/transitionBank.h"
 #include "../gameSource/objectBank.h"
+#include "../gameSource/objectMetadata.h"
 #include "../gameSource/animationBank.h"
 #include "../gameSource/categoryBank.h"
 
@@ -41,12 +42,22 @@
 #include "backup.h"
 #include "triggers.h"
 #include "playerStats.h"
+#include "lineageLog.h"
 #include "serverCalls.h"
 #include "failureLog.h"
 #include "names.h"
+#include "curses.h"
+#include "lineageLimit.h"
 
 
 #include "minorGems/util/random/JenkinsRandomSource.h"
+
+
+//#define IGNORE_PRINTF
+
+#ifdef IGNORE_PRINTF
+#define printf(fmt, ...) (0)
+#endif
 
 
 static JenkinsRandomSource randSource;
@@ -55,9 +66,13 @@ static JenkinsRandomSource randSource;
 #include "../gameSource/GridPos.h"
 
 
-#define HEAT_MAP_D 10
+#define HEAT_MAP_D 8
 
 float targetHeat = 10;
+
+
+double secondsPerYear = 60.0;
+
 
 
 #define PERSON_OBJ_ID 12
@@ -66,6 +81,10 @@ float targetHeat = 10;
 int minPickupBabyAge = 10;
 
 int babyAge = 5;
+
+// age when bare-hand actions become available to a baby (opening doors, etc.)
+int defaultActionAge = 3;
+
 
 double forceDeathAge = 60;
 
@@ -81,6 +100,8 @@ GridPos apocalypseLocation = { 0, 0 };
 int lastApocalypseNumber = 0;
 double apocalypseStartTime = 0;
 char apocalypseStarted = false;
+char postApocalypseStarted = false;
+
 
 double remoteApocalypseCheckInterval = 30;
 double lastRemoteApocalypseCheckTime = 0;
@@ -127,8 +148,17 @@ static int familySpan = 2;
 // phrases that trigger baby and family naming
 static SimpleVector<char*> nameGivingPhrases;
 static SimpleVector<char*> familyNameGivingPhrases;
+static SimpleVector<char*> cursingPhrases;
 
 static char *eveName = NULL;
+
+
+// maps extended ascii codes to true/false for characters allowed in SAY
+// messages
+static char allowedSayCharMap[256];
+
+static const char *allowedSayChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-,'?! ";
+
 
 
 
@@ -138,9 +168,12 @@ typedef struct FreshConnection {
         SimpleVector<char> *sockBuffer;
 
         unsigned int sequenceNumber;
-
+        char *sequenceNumberString;
+        
         WebRequest *ticketServerRequest;
 
+        double ticketServerRequestStartTime;
+        
         char error;
         const char *errorCauseString;
         
@@ -151,10 +184,19 @@ typedef struct FreshConnection {
         double connectionStartTimeSeconds;
 
         char *email;
+        
+        int tutorialNumber;
+        CurseStatus curseStatus;
+        
+        char *twinCode;
+        int twinCount;
+
     } FreshConnection;
 
 
 SimpleVector<FreshConnection> newConnections;
+
+SimpleVector<FreshConnection> waitingForTwinConnections;
 
 
 
@@ -167,8 +209,25 @@ typedef struct LiveObject {
         int displayID;
         
         char *name;
+        char nameHasSuffix;
+        
+        char *lastSay;
+
+        CurseStatus curseStatus;
+        
+        int curseTokenCount;
+        char curseTokenUpdate;
+
 
         char isEve;        
+
+        char isTutorial;
+        
+        // used to track incremental tutorial map loading
+        TutorialLoadProgress tutorialLoad;
+
+
+        GridPos birthPos;
 
         int parentID;
 
@@ -177,6 +236,10 @@ typedef struct LiveObject {
 
         SimpleVector<int> *lineage;
         
+        // id of Eve that started this line
+        int lineageEveID;
+        
+
 
         // time that this life started (for computing age)
         // not actual creation time (can be adjusted to tweak starting age,
@@ -210,6 +273,10 @@ typedef struct LiveObject {
         // as a forced position change
         char posForced;
         
+        char waitingForForceResponse;
+        
+        int lastMoveSequenceNumber;
+        
 
         int pathLength;
         GridPos *pathToDest;
@@ -238,6 +305,12 @@ typedef struct LiveObject {
         char heldOriginValid;
         int heldOriginX;
         int heldOriginY;
+        
+
+        // track origin of held separate to use when placing a grave
+        int heldGraveOriginX;
+        int heldGraveOriginY;
+        
 
         // if held object was created by a transition on a target, what is the
         // object ID of the target from the transition?
@@ -261,18 +334,45 @@ typedef struct LiveObject {
         // and what original weapon killed them?
         int murderSourceID;
         char holdingWound;
+
+        // who killed them?
+        int murderPerpID;
+        char *murderPerpEmail;
+        
+        // or if they were killed by a non-person, what was it?
+        int deathSourceID;
+        
+        // true if this character landed a mortal wound on another player
+        char everKilledAnyone;
+
+        // true in case of sudden infant death
+        char suicide;
         
 
         Socket *sock;
         SimpleVector<char> *sockBuffer;
+        
+        // indicates that some messages were sent to this player this 
+        // frame, and they need a FRAME terminator message
+        char gotPartOfThisFrame;
+        
 
         char isNew;
         char firstMessageSent;
         
+        char inFlight;
+        
+
         char dying;
         // wall clock time when they will be dead
         double dyingETA;
 
+        // in cases where their held wound produces a forced emot
+        char emotFrozen;
+        
+        
+        char connected;
+        
         char error;
         const char *errorCauseString;
         
@@ -296,14 +396,40 @@ typedef struct LiveObject {
         // their local temp
         float heatMap[ HEAT_MAP_D * HEAT_MAP_D ];
 
-        // heat of local object
+        // net heat of environment around player
         // map is tracked in heat units (each object produces an 
         // integer amount of heat)
-        // it is mapped into 0..1 based on targetHeat to set this value here
+        // this is in base heat units, range 0 to infinity
+        float envHeat;
+
+        // amount of heat currently in player's body, also in
+        // base heat units
+        float bodyHeat;
+        
+
+        // used track current biome heat for biome-change shock effects
+        float biomeHeat;
+        float lastBiomeHeat;
+
+
+        // body heat normalized to [0,1], with targetHeat at 0.5
         float heat;
         
+        // flags this player as needing to recieve a heat update
+        char heatUpdate;
+        
+        // wall clock time of last time this player was sent
+        // a heat update
+        double lastHeatUpdate;
+
+
         int foodStore;
         
+        double foodCapModifier;
+
+        double fever;
+        
+
         // wall clock time when we should decrement the food store
         double foodDecrementETASeconds;
         
@@ -319,6 +445,14 @@ typedef struct LiveObject {
         char justAte;
         int justAteID;
         
+        // chain of non-repeating foods eaten
+        SimpleVector<int> yummyFoodChain;
+        
+        // how many bonus from yummy food is stored
+        // these are used first before food is decremented
+        int yummyBonusStore;
+        
+
         ClothingSet clothing;
         
         timeSec_t clothingEtaDecay[NUM_CLOTHING_PIECES];
@@ -330,7 +464,8 @@ typedef struct LiveObject {
 
         char needsUpdate;
         char updateSent;
-
+        char updateGlobal;
+        
         // babies born to this player
         SimpleVector<timeSec_t> *babyBirthTimes;
         SimpleVector<int> *babyIDs;
@@ -343,11 +478,146 @@ typedef struct LiveObject {
 
         timeSec_t lastRegionLookTime;
         
+        double playerCrossingCheckTime;
+        
+
+        char monumentPosSet;
+        GridPos lastMonumentPos;
+        int lastMonumentID;
+        char monumentPosSent;
+        
+
+        char holdingFlightObject;
+
     } LiveObject;
 
 
 
 SimpleVector<LiveObject> players;
+SimpleVector<LiveObject> tutorialLoadingPlayers;
+
+
+
+static char checkReadOnly() {
+    const char *testFileName = "testReadOnly.txt";
+    
+    FILE *testFile = fopen( testFileName, "w" );
+    
+    if( testFile != NULL ) {
+        
+        fclose( testFile );
+        remove( testFileName );
+        return false;
+        }
+    return true;
+    }
+
+
+
+
+// returns a person to their natural state
+static void backToBasics( LiveObject *inPlayer ) {
+    LiveObject *p = inPlayer;
+
+    // do not heal dying people
+    if( ! p->holdingWound && p->holdingID > 0 ) {
+        
+        p->holdingID = 0;
+        
+        p->holdingEtaDecay = 0;
+        
+        p->heldOriginValid = false;
+        p->heldTransitionSourceID = -1;
+        
+        
+        p->numContained = 0;
+        if( p->containedIDs != NULL ) {
+            delete [] p->containedIDs;
+            delete [] p->containedEtaDecays;
+            p->containedIDs = NULL;
+        p->containedEtaDecays = NULL;
+            }
+        
+        if( p->subContainedIDs != NULL ) {
+            delete [] p->subContainedIDs;
+            delete [] p->subContainedEtaDecays;
+            p->subContainedIDs = NULL;
+            p->subContainedEtaDecays = NULL;
+            }
+        }
+        
+        
+    p->clothing = getEmptyClothingSet();
+    
+    for( int c=0; c<NUM_CLOTHING_PIECES; c++ ) {
+        p->clothingEtaDecay[c] = 0;
+        p->clothingContained[c].deleteAll();
+        p->clothingContainedEtaDecays[c].deleteAll();
+        }
+    }
+
+
+
+
+typedef struct GraveInfo {
+        GridPos pos;
+        int playerID;
+    } GraveInfo;
+
+
+typedef struct GraveMoveInfo {
+        GridPos posStart;
+        GridPos posEnd;
+    } GraveMoveInfo;
+
+
+
+
+// tracking spots on map that inflicted a mortal wound
+// put them on timeout afterward so that they don't attack
+// again immediately
+typedef struct DeadlyMapSpot {
+        GridPos pos;
+        double timeOfAttack;
+    } DeadlyMapSpot;
+
+
+static double deadlyMapSpotTimeoutSec = 10;
+
+static SimpleVector<DeadlyMapSpot> deadlyMapSpots;
+
+
+static char wasRecentlyDeadly( GridPos inPos ) {
+    double curTime = Time::getCurrentTime();
+    
+    for( int i=0; i<deadlyMapSpots.size(); i++ ) {
+        
+        DeadlyMapSpot *s = deadlyMapSpots.getElement( i );
+        
+        if( curTime - s->timeOfAttack >= deadlyMapSpotTimeoutSec ) {
+            deadlyMapSpots.deleteElement( i );
+            i--;
+            }
+        else if( s->pos.x == inPos.x && s->pos.y == inPos.y ) {
+            // note that this is a lazy method that only walks through
+            // the whole list and checks for timeouts when
+            // inPos isn't found
+            return true;
+            }
+        }
+    return false;
+    }
+
+
+
+static void addDeadlyMapSpot( GridPos inPos ) {
+    // don't check for duplicates
+    // we're only called to add a new deadly spot when the spot isn't
+    // currently on deadly cooldown anyway
+    DeadlyMapSpot s = { inPos, Time::getCurrentTime() };
+    deadlyMapSpots.push_back( s );
+    }
+
 
 
 
@@ -467,10 +737,35 @@ FullMapContained getFullMapContained( int inX, int inY ) {
     }
 
 
+
+void freePlayerContainedArrays( LiveObject *inPlayer ) {
+    if( inPlayer->containedIDs != NULL ) {
+        delete [] inPlayer->containedIDs;
+        }
+    if( inPlayer->containedEtaDecays != NULL ) {
+        delete [] inPlayer->containedEtaDecays;
+        }
+    if( inPlayer->subContainedIDs != NULL ) {
+        delete [] inPlayer->subContainedIDs;
+        }
+    if( inPlayer->subContainedEtaDecays != NULL ) {
+        delete [] inPlayer->subContainedEtaDecays;
+        }
+
+    inPlayer->containedIDs = NULL;
+    inPlayer->containedEtaDecays = NULL;
+    inPlayer->subContainedIDs = NULL;
+    inPlayer->subContainedEtaDecays = NULL;
+    }
+
+
+
 void setContained( LiveObject *inPlayer, FullMapContained inContained ) {
     
     inPlayer->numContained = inContained.numContained;
-                                    
+     
+    freePlayerContainedArrays( inPlayer );
+    
     inPlayer->containedIDs = inContained.containedIDs;
     
     inPlayer->containedEtaDecays =
@@ -611,6 +906,46 @@ static double measurePathLength( int inXS, int inYS,
 
 
 
+
+static double getPathSpeedModifier( GridPos *inPathPos, int inPathLength ) {
+    
+    if( inPathLength < 1 ) {
+        return 1;
+        }
+    
+
+    int floor = getMapFloor( inPathPos[0].x, inPathPos[0].y );
+
+    if( floor == 0 ) {
+        return 1;
+        }
+
+    double speedMult = getObject( floor )->speedMult;
+    
+    if( speedMult == 1 ) {
+        return 1;
+        }
+    
+
+    // else we have a speed mult for at least first step in path
+    // see if we have same floor for rest of path
+
+    for( int i=1; i<inPathLength; i++ ) {
+        
+        int thisFloor = getMapFloor( inPathPos[i].x, inPathPos[i].y );
+        
+        if( thisFloor != floor ) {
+            // not same floor whole way
+            return 1;
+            }
+        }
+    // same floor whole way
+    printf( "Speed modifier = %f\n", speedMult );
+    return speedMult;
+    }
+
+
+
 static int getLiveObjectIndex( int inID ) {
     for( int i=0; i<players.size(); i++ ) {
         LiveObject *o = players.getElement( i );
@@ -630,27 +965,54 @@ static int getLiveObjectIndex( int inID ) {
 int nextID = 2;
 
 
+static void deleteMembers( FreshConnection *inConnection ) {
+    delete inConnection->sock;
+    delete inConnection->sockBuffer;
+    
+    if( inConnection->sequenceNumberString != NULL ) {    
+        delete [] inConnection->sequenceNumberString;
+        }
+    
+    if( inConnection->ticketServerRequest != NULL ) {
+        delete inConnection->ticketServerRequest;
+        }
+    
+    if( inConnection->email != NULL ) {
+        delete [] inConnection->email;
+        }
+    
+    if( inConnection->twinCode != NULL ) {
+        delete [] inConnection->twinCode;
+        }
+    }
+
+
+
 
 void quitCleanup() {
     AppLog::info( "Cleaning up on quit..." );
-    
 
-    for( int i=0; i<newConnections.size(); i++ ) {
-        FreshConnection *nextConnection = newConnections.getElement( i );
+    // FreshConnections are in two different lists
+    // free structures from both
+    SimpleVector<FreshConnection> *connectionLists[2] =
+        { &newConnections, &waitingForTwinConnections };
+
+    for( int c=0; c<2; c++ ) {
+        SimpleVector<FreshConnection> *list = connectionLists[c];
         
-        delete nextConnection->sock;
-        delete nextConnection->sockBuffer;
-        
-
-        if( nextConnection->ticketServerRequest != NULL ) {
-            delete nextConnection->ticketServerRequest;
+        for( int i=0; i<list->size(); i++ ) {
+            FreshConnection *nextConnection = list->getElement( i );
+            deleteMembers( nextConnection );
             }
-
-        if( nextConnection->email != NULL ) {
-            delete [] nextConnection->email;
-            }
+        list->deleteAll();
         }
-    newConnections.deleteAll();
+    
+    // add these to players to clean them up togeter
+    for( int i=0; i<tutorialLoadingPlayers.size(); i++ ) {
+        LiveObject nextPlayer = tutorialLoadingPlayers.getElementDirect( i );
+        players.push_back( nextPlayer );
+        }
+    tutorialLoadingPlayers.deleteAll();
     
 
 
@@ -663,26 +1025,17 @@ void quitCleanup() {
         if( nextPlayer->name != NULL ) {
             delete [] nextPlayer->name;
             }
+
+        if( nextPlayer->lastSay != NULL ) {
+            delete [] nextPlayer->lastSay;
+            }
         
         if( nextPlayer->email != NULL  ) {
             delete [] nextPlayer->email;
             }
 
-        if( nextPlayer->containedIDs != NULL ) {
-            delete [] nextPlayer->containedIDs;
-            }
 
-        if( nextPlayer->containedEtaDecays != NULL ) {
-            delete [] nextPlayer->containedEtaDecays;
-            }
-        
-        if( nextPlayer->subContainedIDs != NULL ) {
-            delete [] nextPlayer->subContainedIDs;
-            }
-        
-        if( nextPlayer->subContainedEtaDecays != NULL ) {
-            delete [] nextPlayer->subContainedEtaDecays;
-            }
+        freePlayerContainedArrays( nextPlayer );
         
         
         if( nextPlayer->pathToDest != NULL ) {
@@ -699,9 +1052,15 @@ void quitCleanup() {
         }
     players.deleteAll();
 
-    freePlayerStats();
 
+    freeLineageLimit();
+    
+    freePlayerStats();
+    freeLineageLog();
+    
     freeNames();
+    
+    freeCurses();
     
     freeLifeLog();
     
@@ -735,7 +1094,8 @@ void quitCleanup() {
 
     nameGivingPhrases.deallocateStringElements();
     familyNameGivingPhrases.deallocateStringElements();
-    
+    cursingPhrases.deallocateStringElements();
+
     if( eveName != NULL ) {
         delete [] eveName;
         eveName = NULL;
@@ -799,6 +1159,34 @@ char readSocketFull( Socket *inSock, SimpleVector<char> *inBuffer ) {
     int numRead = inSock->receive( (unsigned char*)buffer, 512, 0 );
     
     if( numRead == -1 ) {
+
+        if( ! inSock->isSocketInFDRange() ) {
+            // the internal FD of this socket is out of range
+            // probably some kind of heap corruption.
+
+            // save a bug report
+            int allow = 
+                SettingsManager::getIntSetting( "allowBugReports", 0 );
+
+            if( allow ) {
+                char *bugName = 
+                    autoSprintf( "bug_socket_%f", Time::getCurrentTime() );
+                
+                char *bugOutName = autoSprintf( "%s_out.txt", bugName );
+                
+                File outFile( NULL, "serverOut.txt" );
+                if( outFile.exists() ) {
+                    fflush( stdout );
+                    File outCopyFile( NULL, bugOutName );
+                    
+                    outFile.copy( &outCopyFile );
+                    }
+                delete [] bugName;
+                delete [] bugOutName;
+                }
+            }
+        
+            
         return false;
         }
     
@@ -866,9 +1254,14 @@ typedef enum messageType {
     DROP,
     KILL,
     SAY,
+    EMOT,
+    JUMP,
+    DIE,
+    FORCE,
     MAP,
     TRIGGER,
     BUG,
+    PING,
     UNKNOWN
     } messageType;
 
@@ -877,7 +1270,7 @@ typedef enum messageType {
 
 typedef struct ClientMessage {
         messageType type;
-        int x, y, c, i;
+        int x, y, c, i, id;
         
         int trigger;
         int bug;
@@ -894,6 +1287,9 @@ typedef struct ClientMessage {
         // null if type not BUG
         char *bugText;
 
+        // for MOVE messages
+        int sequenceNumber;
+
     } ClientMessage;
 
 
@@ -901,7 +1297,8 @@ static int pathDeltaMax = 16;
 
 
 // if extraPos present in result, destroyed by caller
-ClientMessage parseMessage( char *inMessage ) {
+// inMessage may be modified by this call
+ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
     
     char nameBuffer[100];
     
@@ -909,15 +1306,59 @@ ClientMessage parseMessage( char *inMessage ) {
     
     m.i = -1;
     m.c = -1;
+    m.id = -1;
     m.trigger = -1;
     m.numExtraPos = 0;
     m.extraPos = NULL;
     m.saidText = NULL;
     m.bugText = NULL;
+    m.sequenceNumber = -1;
+    
     // don't require # terminator here
+    
+    
+    //int numRead = sscanf( inMessage, 
+    //                      "%99s %d %d", nameBuffer, &( m.x ), &( m.y ) );
+    
 
-    int numRead = sscanf( inMessage, 
-                          "%99s %d %d", nameBuffer, &( m.x ), &( m.y ) );
+    // profiler finds sscanf as a hotspot
+    // try a custom bit of code instead
+    
+    int numRead = 0;
+    
+    int parseLen = strlen( inMessage );
+    if( parseLen > 99 ) {
+        parseLen = 99;
+        }
+    
+    for( int i=0; i<parseLen; i++ ) {
+        if( inMessage[i] == ' ' ) {
+            switch( numRead ) {
+                case 0:
+                    if( i != 0 ) {
+                        memcpy( nameBuffer, inMessage, i );
+                        nameBuffer[i] = '\0';
+                        numRead++;
+                        // rewind back to read the space again
+                        // before the first number
+                        i--;
+                        }
+                    break;
+                case 1:
+                    m.x = atoi( &( inMessage[i] ) );
+                    numRead++;
+                    break;
+                case 2:
+                    m.y = atoi( &( inMessage[i] ) );
+                    numRead++;
+                    break;
+                }
+            if( numRead == 3 ) {
+                break;
+                }
+            }
+        }
+    
 
     
     if( numRead >= 2 &&
@@ -946,33 +1387,54 @@ ClientMessage parseMessage( char *inMessage ) {
 
     if( strcmp( nameBuffer, "MOVE" ) == 0) {
         m.type = MOVE;
-
-        SimpleVector<char *> *tokens =
-            tokenizeString( inMessage );
         
-        // require an odd number at least 5
-        if( tokens->size() < 5 || tokens->size() % 2 != 1 ) {
-            tokens->deallocateStringElements();
+        char *atPos = strstr( inMessage, "@" );
+        
+        int offset = 3;
+        
+        if( atPos != NULL ) {
+            offset = 4;            
+            }
+        
+
+        // in place, so we don't need to deallocate them
+        SimpleVector<char *> *tokens =
+            tokenizeStringInPlace( inMessage );
+        
+        // require an even number of extra coords beyond offset
+        if( tokens->size() < offset + 2 || 
+            ( tokens->size() - offset ) %2 != 0 ) {
+            
             delete tokens;
             
             m.type = UNKNOWN;
             return m;
             }
         
+        if( atPos != NULL ) {
+            // skip @ symbol in token and parse int
+            m.sequenceNumber = atoi( &( tokens->getElementDirect( 3 )[1] ) );
+            }
+
         int numTokens = tokens->size();
         
-        m.numExtraPos = (numTokens - 3) / 2;
+        m.numExtraPos = (numTokens - offset) / 2;
         
         m.extraPos = new GridPos[ m.numExtraPos ];
 
         for( int e=0; e<m.numExtraPos; e++ ) {
             
-            char *xToken = tokens->getElementDirect( 3 + e * 2 );
-            char *yToken = tokens->getElementDirect( 3 + e * 2 + 1 );
+            char *xToken = tokens->getElementDirect( offset + e * 2 );
+            char *yToken = tokens->getElementDirect( offset + e * 2 + 1 );
             
+            // profiler found sscanf is a bottleneck here
+            // try atoi instead
+            //sscanf( xToken, "%d", &( m.extraPos[e].x ) );
+            //sscanf( yToken, "%d", &( m.extraPos[e].y ) );
+
+            m.extraPos[e].x = atoi( xToken );
+            m.extraPos[e].y = atoi( yToken );
             
-            sscanf( xToken, "%d", &( m.extraPos[e].x ) );
-            sscanf( yToken, "%d", &( m.extraPos[e].y ) );
             
             if( abs( m.extraPos[e].x ) > pathDeltaMax ||
                 abs( m.extraPos[e].y ) > pathDeltaMax ) {
@@ -994,8 +1456,16 @@ ClientMessage parseMessage( char *inMessage ) {
             m.extraPos[e].y += m.y;
             }
         
-        tokens->deallocateStringElements();
         delete tokens;
+        }
+    else if( strcmp( nameBuffer, "JUMP" ) == 0 ) {
+        m.type = JUMP;
+        }
+    else if( strcmp( nameBuffer, "DIE" ) == 0 ) {
+        m.type = DIE;
+        }
+    else if( strcmp( nameBuffer, "FORCE" ) == 0 ) {
+        m.type = FORCE;
         }
     else if( strcmp( nameBuffer, "USE" ) == 0 ) {
         m.type = USE;
@@ -1014,16 +1484,39 @@ ClientMessage parseMessage( char *inMessage ) {
     else if( strcmp( nameBuffer, "UBABY" ) == 0 ) {
         m.type = UBABY;
 
+        // id param optional
         numRead = sscanf( inMessage, 
-                          "%99s %d %d %d", 
-                          nameBuffer, &( m.x ), &( m.y ), &( m.i ) );
+                          "%99s %d %d %d %d", 
+                          nameBuffer, &( m.x ), &( m.y ), &( m.i ), &( m.id ) );
         
-        if( numRead != 4 ) {
+        if( numRead != 4 && numRead != 5 ) {
             m.type = UNKNOWN;
+            }
+        if( numRead != 5 ) {
+            m.id = -1;
             }
         }
     else if( strcmp( nameBuffer, "BABY" ) == 0 ) {
         m.type = BABY;
+        // read optional id parameter
+        numRead = sscanf( inMessage, 
+                          "%99s %d %d %d", 
+                          nameBuffer, &( m.x ), &( m.y ), &( m.id ) );
+        
+        if( numRead != 4 ) {
+            m.id = -1;
+            }
+        }
+    else if( strcmp( nameBuffer, "PING" ) == 0 ) {
+        m.type = PING;
+        // read unique id parameter
+        numRead = sscanf( inMessage, 
+                          "%99s %d %d %d", 
+                          nameBuffer, &( m.x ), &( m.y ), &( m.id ) );
+        
+        if( numRead != 4 ) {
+            m.id = 0;
+            }
         }
     else if( strcmp( nameBuffer, "SREMV" ) == 0 ) {
         m.type = SREMV;
@@ -1060,6 +1553,15 @@ ClientMessage parseMessage( char *inMessage ) {
         }
     else if( strcmp( nameBuffer, "KILL" ) == 0 ) {
         m.type = KILL;
+        
+        // read optional id parameter
+        numRead = sscanf( inMessage, 
+                          "%99s %d %d %d", 
+                          nameBuffer, &( m.x ), &( m.y ), &( m.id ) );
+        
+        if( numRead != 4 ) {
+            m.id = -1;
+            }
         }
     else if( strcmp( nameBuffer, "MAP" ) == 0 ) {
         m.type = MAP;
@@ -1084,10 +1586,30 @@ ClientMessage parseMessage( char *inMessage ) {
                 }
             }
         }
+    else if( strcmp( nameBuffer, "EMOT" ) == 0 ) {
+        m.type = EMOT;
+
+        numRead = sscanf( inMessage, 
+                          "%99s %d %d %d", 
+                          nameBuffer, &( m.x ), &( m.y ), &( m.i ) );
+        
+        if( numRead != 4 ) {
+            m.type = UNKNOWN;
+            }
+        }
     else {
         m.type = UNKNOWN;
         }
     
+    // incoming client messages are relative to birth pos
+    m.x += inPlayer->birthPos.x;
+    m.y += inPlayer->birthPos.y;
+
+    for( int i=0; i<m.numExtraPos; i++ ) {
+        m.extraPos[i].x += inPlayer->birthPos.x;
+        m.extraPos[i].y += inPlayer->birthPos.y;
+        }
+
     return m;
     }
 
@@ -1129,6 +1651,21 @@ GridPos computePartialMoveSpot( LiveObject *inPlayer ) {
         GridPos cPos = { inPlayer->xs, inPlayer->ys };
         
         return cPos;
+        }
+    }
+
+
+
+GridPos getPlayerPos( LiveObject *inPlayer ) {
+    if( inPlayer->xs == inPlayer->xd &&
+        inPlayer->ys == inPlayer->yd ) {
+        
+        GridPos cPos = { inPlayer->xs, inPlayer->ys };
+        
+        return cPos;
+        }
+    else {
+        return computePartialMoveSpot( inPlayer );
         }
     }
 
@@ -1187,7 +1724,7 @@ double computeFoodDecrementTimeSeconds( LiveObject *inPlayer ) {
 
 
 double getAgeRate() {
-    return 1.0 / 60.0;
+    return 1.0 / secondsPerYear;
     }
 
 
@@ -1199,7 +1736,8 @@ static void setDeathReason( LiveObject *inPlayer, const char *inTag,
         }
     
     // leave space in front so it works at end of PU line
-    if( strcmp( inTag, "killed" ) == 0 ) {
+    if( strcmp( inTag, "killed" ) == 0 ||
+        strcmp( inTag, "succumbed" ) == 0 ) {
         
         inPlayer->deathReason = autoSprintf( " reason_%s_%d", 
                                              inTag, inOptionalID );
@@ -1216,7 +1754,11 @@ int longestShutdownLine = -1;
 
 void handleShutdownDeath( LiveObject *inPlayer,
                           int inX, int inY ) {
-    if( inPlayer->parentChainLength > longestShutdownLine ) {
+    if( inPlayer->curseStatus.curseLevel == 0 &&
+        inPlayer->parentChainLength > longestShutdownLine ) {
+        
+        // never count a cursed player as a long line
+        
         longestShutdownLine = inPlayer->parentChainLength;
         
         FILE *f = fopen( "shutdownLongLineagePos.txt", "w" );
@@ -1294,13 +1836,15 @@ char isFertileAge( LiveObject *inPlayer ) {
 int computeFoodCapacity( LiveObject *inPlayer ) {
     int ageInYears = lrint( computeAge( inPlayer ) );
     
+    int returnVal = 0;
+    
     if( ageInYears < 44 ) {
         
         if( ageInYears > 16 ) {
             ageInYears = 16;
             }
         
-        return ageInYears + 4;
+        returnVal = ageInYears + 4;
         }
     else {
         // food capacity decreases as we near 60
@@ -1310,19 +1854,29 @@ int computeFoodCapacity( LiveObject *inPlayer ) {
             cap = 4;
             }
         
-        return cap;
+        returnVal = cap;
         }
+
+    return ceil( returnVal * inPlayer->foodCapModifier );
     }
+
+
+
+// with 128-wide tiles, character moves at 480 pixels per second
+// at 60 fps, this is 8 pixels per frame
+// important that it's a whole number of pixels for smooth camera movement
+static double baseWalkSpeed = 3.75;
+
+// min speed for takeoff
+static double minFlightSpeed = 15;
+
 
 
 double computeMoveSpeed( LiveObject *inPlayer ) {
     double age = computeAge( inPlayer );
     
 
-    // with 128-wide tiles, character moves at 480 pixels per second
-    // at 60 fps, this is 8 pixels per frame
-    // important that it's a whole number of pixels for smooth camera movement
-    double speed = 3.75;
+    double speed = baseWalkSpeed;
     
     // baby moves at 360 pixels per second, or 6 pixels per frame
     double babySpeedFactor = 0.75;
@@ -1362,10 +1916,6 @@ double computeMoveSpeed( LiveObject *inPlayer ) {
     */
 
 
-    // never move at 0 speed, divide by 0 errors for eta times
-    if( speed < 0.1 ) {
-        speed = 0.1;
-        }
 
     // apply character's speed mult
     speed *= getObject( inPlayer->displayID )->speedMult;
@@ -1399,6 +1949,12 @@ double computeMoveSpeed( LiveObject *inPlayer ) {
                 }
             }
         }
+
+    // never move at 0 speed, divide by 0 errors for eta times
+    if( speed < 0.01 ) {
+        speed = 0.01;
+        }
+
     
     // after all multipliers, make sure it's a whole number of pixels per frame
 
@@ -1427,22 +1983,649 @@ double computeMoveSpeed( LiveObject *inPlayer ) {
 
 
 
-    
-    
-// returns NULL if there are no matching moves
-char *getMovesMessage( char inNewMovesOnly, 
-                       SimpleVector<ChangePosition> *inChangeVector = NULL,
-                       int inOneIDOnly = -1 ) {
-    
-    SimpleVector<char> messageBuffer;
+static double distance( GridPos inA, GridPos inB ) {
+    double dx = (double)inA.x - (double)inB.x;
+    double dy = (double)inA.y - (double)inB.y;
 
-    messageBuffer.appendElementString( "PM\n" );
+    return sqrt(  dx * dx + dy * dy );
+    }
 
+
+
+static float sign( float inF ) {
+    if (inF > 0) return 1;
+    if (inF < 0) return -1;
+    return 0;
+    }
+
+
+// how often do we check what a player is standing on top of for attack effects?
+static double playerCrossingCheckStepTime = 0.25;
+
+
+// for steps in main loop that shouldn't happen every loop
+// (loop runs faster or slower depending on how many messages are incoming)
+static double periodicStepTime = 0.25;
+static double lastPeriodicStepTime = 0;
+
+
+
+
+// recompute heat for fixed number of players per timestep
+static int numPlayersRecomputeHeatPerStep = 8;
+static int lastPlayerIndexHeatRecomputed = -1;
+static double lastHeatUpdateTime = 0;
+static double heatUpdateTimeStep = 0.1;
+
+
+// how often the player's personal heat advances toward their environmental
+// heat value
+static double heatUpdateSeconds = 2;
+
+
+// air itself offers some insulation
+// a vacuum panel has R-value that is 25x greater than air
+static float rAir = 0.04;
+
+
+
+// blend R-values multiplicatively, for layers
+// 1 - R( A + B ) = (1 - R(A)) * (1 - R(B))
+//
+// or
+//
+//R( A + B ) =  R(A) + R(B) - R(A) * R(B)
+static double rCombine( double inRA, double inRB ) {
+    return inRA + inRB - inRA * inRB;
+    }
+
+
+
+
+static float computeClothingR( LiveObject *inPlayer ) {
+    
+    float headWeight = 0.25;
+    float chestWeight = 0.35;
+    float buttWeight = 0.2;
+    float eachFootWeigth = 0.1;
+            
+    float backWeight = 0.1;
+
+
+    float clothingR = 0;
+            
+    if( inPlayer->clothing.hat != NULL ) {
+        clothingR += headWeight *  inPlayer->clothing.hat->rValue;
+        }
+    if( inPlayer->clothing.tunic != NULL ) {
+        clothingR += chestWeight * inPlayer->clothing.tunic->rValue;
+        }
+    if( inPlayer->clothing.frontShoe != NULL ) {
+        clothingR += 
+            eachFootWeigth * inPlayer->clothing.frontShoe->rValue;
+        }
+    if( inPlayer->clothing.backShoe != NULL ) {
+        clothingR += eachFootWeigth * 
+            inPlayer->clothing.backShoe->rValue;
+        }
+    if( inPlayer->clothing.bottom != NULL ) {
+        clothingR += buttWeight * inPlayer->clothing.bottom->rValue;
+        }
+    if( inPlayer->clothing.backpack != NULL ) {
+        clothingR += backWeight * inPlayer->clothing.backpack->rValue;
+        }
+    
+    // even if the player is naked, they are insulated from their
+    // environment by rAir
+    return rCombine( rAir, clothingR );
+    }
+
+
+
+static float computeClothingHeat( LiveObject *inPlayer ) {
+    // clothing can contribute heat
+    // apply this separate from heat grid above
+    float clothingHeat = 0;
+    for( int c=0; c<NUM_CLOTHING_PIECES; c++ ) {
+                
+        ObjectRecord *cO = clothingByIndex( inPlayer->clothing, c );
+            
+        if( cO != NULL ) {
+            clothingHeat += cO->heatValue;
+
+            // contained items in clothing can contribute
+            // heat, shielded by clothing r-values
+            double cRFactor = 1 - cO->rValue;
+
+            for( int s=0; 
+                 s < inPlayer->clothingContained[c].size(); s++ ) {
+                        
+                ObjectRecord *sO = 
+                    getObject( inPlayer->clothingContained[c].
+                               getElementDirect( s ) );
+                        
+                clothingHeat += 
+                    sO->heatValue * cRFactor;
+                }
+            }
+        }
+    return clothingHeat;
+    }
+
+
+
+
+static void recomputeHeatMap( LiveObject *inPlayer ) {
+    
+    int gridSize = HEAT_MAP_D * HEAT_MAP_D;
+
+    // what if we recompute it from scratch every time?
+    for( int i=0; i<gridSize; i++ ) {
+        inPlayer->heatMap[i] = 0;
+        }
+
+    float heatOutputGrid[ HEAT_MAP_D * HEAT_MAP_D ];
+    float rGrid[ HEAT_MAP_D * HEAT_MAP_D ];
+    float rFloorGrid[ HEAT_MAP_D * HEAT_MAP_D ];
+
+
+    GridPos pos = getPlayerPos( inPlayer );
+
+
+    // held baby's pos matches parent pos
+    if( inPlayer->heldByOther ) {
+        LiveObject *parentObject = getLiveObject( inPlayer->heldByOtherID );
+        
+        if( parentObject != NULL ) {
+            pos = getPlayerPos( parentObject );
+            }
+        } 
+
+    
+    
+
+    for( int y=0; y<HEAT_MAP_D; y++ ) {
+        int mapY = pos.y + y - HEAT_MAP_D / 2;
+                
+        for( int x=0; x<HEAT_MAP_D; x++ ) {
+                    
+            int mapX = pos.x + x - HEAT_MAP_D / 2;
+                    
+            int j = y * HEAT_MAP_D + x;
+            heatOutputGrid[j] = 0;
+            rGrid[j] = rAir;
+            rFloorGrid[j] = rAir;
+
+
+            // call Raw version for better performance
+            // we don't care if object decayed since we last looked at it
+            ObjectRecord *o = getObject( getMapObjectRaw( mapX, mapY ) );
+                    
+                    
+                    
+
+            if( o != NULL ) {
+                heatOutputGrid[j] += o->heatValue;
+                if( o->permanent ) {
+                    // loose objects sitting on ground don't
+                    // contribute to r-value (like dropped clothing)
+                    rGrid[j] = rCombine( rGrid[j], o->rValue );
+                    }
+
+
+                // skip checking for heat-producing contained items
+                // for now.  Consumes too many server-side resources
+                // can still check for heat produced by stuff in
+                // held container (below).
+                        
+                if( false && o->numSlots > 0 ) {
+                    // contained can produce heat shielded by container
+                    // r value
+                    double oRFactor = 1 - o->rValue;
+                            
+                    int numCont;
+                    int *cont = getContained( mapX, mapY, &numCont );
+                            
+                    if( cont != NULL ) {
+                                
+                        for( int c=0; c<numCont; c++ ) {
+                                    
+                            int cID = cont[c];
+                            char hasSub = false;
+                            if( cID < 0 ) {
+                                hasSub = true;
+                                cID = -cID;
+                                }
+
+                            ObjectRecord *cO = getObject( cID );
+                            heatOutputGrid[j] += 
+                                cO->heatValue * oRFactor;
+                                    
+                            if( hasSub ) {
+                                double cRFactor = 1 - cO->rValue;
+                                        
+                                int numSub;
+                                int *sub = getContained( mapX, mapY, 
+                                                         &numSub, 
+                                                         c + 1 );
+                                if( sub != NULL ) {
+                                    for( int s=0; s<numSub; s++ ) {
+                                        ObjectRecord *sO = 
+                                            getObject( sub[s] );
+                                                
+                                        heatOutputGrid[j] += 
+                                            sO->heatValue * 
+                                            cRFactor * 
+                                            oRFactor;
+                                        }
+                                    delete [] sub;
+                                    }
+                                }
+                            }
+                        delete [] cont;
+                        }
+                    }
+                }
+                    
+
+            // floor can insulate or produce heat too
+            ObjectRecord *fO = getObject( getMapFloor( mapX, mapY ) );
+                    
+            if( fO != NULL ) {
+                heatOutputGrid[j] += fO->heatValue;
+                rFloorGrid[j] = rCombine( rFloorGrid[j], fO->rValue );
+                }
+            }
+        }
+
+
+    
+    int numNeighbors = 8;
+    int ndx[8] = { 0, 1,  0, -1,  1,  1, -1, -1 };
+    int ndy[8] = { 1, 0, -1,  0,  1, -1,  1, -1 };
+    
+            
+    int playerMapIndex = 
+        ( HEAT_MAP_D / 2 ) * HEAT_MAP_D +
+        ( HEAT_MAP_D / 2 );
+        
+
+    
+    // what player is holding can contribute heat
+    // add this to the grid, since it's "outside" the player's body
+    if( inPlayer->holdingID > 0 ) {
+        ObjectRecord *heldO = getObject( inPlayer->holdingID );
+                
+        heatOutputGrid[ playerMapIndex ] += heldO->heatValue;
+                
+        double heldRFactor = 1 - heldO->rValue;
+                
+        // contained can contribute too, but shielded by r-value
+        // of container
+        for( int c=0; c<inPlayer->numContained; c++ ) {
+                    
+            int cID = inPlayer->containedIDs[c];
+            char hasSub = false;
+                    
+            if( cID < 0 ) {
+                hasSub = true;
+                cID = -cID;
+                }
+
+            ObjectRecord *contO = getObject( cID );
+                    
+            heatOutputGrid[ playerMapIndex ] += 
+                contO->heatValue * heldRFactor;
+                    
+
+            if( hasSub ) {
+                // sub contained too, but shielded by both r-values
+                double contRFactor = 1 - contO->rValue;
+
+                for( int s=0; 
+                     s<inPlayer->subContainedIDs[c].size(); s++ ) {
+                        
+                    ObjectRecord *subO =
+                        getObject( inPlayer->subContainedIDs[c].
+                                   getElementDirect( s ) );
+                            
+                    heatOutputGrid[ playerMapIndex ] += 
+                        subO->heatValue * 
+                        contRFactor * heldRFactor;
+                    }
+                }
+            }
+        }
+            
+            
+
+    // grid of flags for points that are in same airspace (surrounded by walls)
+    // as player
+    // This is the area where heat spreads evenly by convection
+    char airSpaceGrid[ HEAT_MAP_D * HEAT_MAP_D ];
+    
+    memset( airSpaceGrid, false, HEAT_MAP_D * HEAT_MAP_D );
+    
+    airSpaceGrid[ playerMapIndex ] = true;
+
+    SimpleVector<int> frontierA;
+    SimpleVector<int> frontierB;
+    frontierA.push_back( playerMapIndex );
+    
+    SimpleVector<int> *thisFrontier = &frontierA;
+    SimpleVector<int> *nextFrontier = &frontierB;
+
+    while( thisFrontier->size() > 0 ) {
+
+        for( int f=0; f<thisFrontier->size(); f++ ) {
+            
+            int i = thisFrontier->getElementDirect( f );
+            
+            char negativeYCutoff = false;
+            
+            if( rGrid[i] > rAir ) {
+                // grid cell is insulating, and somehow it's in our
+                // frontier.  Player must be standing behind a closed
+                // door.  Block neighbors to south
+                negativeYCutoff = true;
+                }
+            
+
+            int x = i % HEAT_MAP_D;
+            int y = i / HEAT_MAP_D;
+            
+            for( int n=0; n<numNeighbors; n++ ) {
+                        
+                int nx = x + ndx[n];
+                int ny = y + ndy[n];
+                
+                if( negativeYCutoff && ndy[n] < 1 ) {
+                    continue;
+                    }
+
+                if( nx >= 0 && nx < HEAT_MAP_D &&
+                    ny >= 0 && ny < HEAT_MAP_D ) {
+
+                    int nj = ny * HEAT_MAP_D + nx;
+                    
+                    if( ! airSpaceGrid[ nj ]
+                        && rGrid[ nj ] <= rAir ) {
+
+                        airSpaceGrid[ nj ] = true;
+                        
+                        nextFrontier->push_back( nj );
+                        }
+                    }
+                }
+            }
+        
+        thisFrontier->deleteAll();
+        
+        SimpleVector<int> *temp = thisFrontier;
+        thisFrontier = nextFrontier;
+        
+        nextFrontier = temp;
+        }
+    
+    if( rGrid[playerMapIndex] > rAir ) {
+        // player standing in insulated spot
+        // don't count this as part of their air space
+        airSpaceGrid[ playerMapIndex ] = false;
+        }
+
+    int numInAirspace = 0;
+    for( int i=0; i<gridSize; i++ ) {
+        if( airSpaceGrid[ i ] ) {
+            numInAirspace++;
+            }
+        }
+    
+    
+    float rBoundarySum = 0;
+    int rBoundarySize = 0;
+    
+    for( int i=0; i<gridSize; i++ ) {
+        if( airSpaceGrid[i] ) {
+            
+            int x = i % HEAT_MAP_D;
+            int y = i / HEAT_MAP_D;
+            
+            for( int n=0; n<numNeighbors; n++ ) {
+                        
+                int nx = x + ndx[n];
+                int ny = y + ndy[n];
+                
+                if( nx >= 0 && nx < HEAT_MAP_D &&
+                    ny >= 0 && ny < HEAT_MAP_D ) {
+                    
+                    int nj = ny * HEAT_MAP_D + nx;
+                    
+                    if( ! airSpaceGrid[ nj ] ) {
+                        
+                        // boundary!
+                        rBoundarySum += rGrid[ nj ];
+                        rBoundarySize ++;
+                        }
+                    }
+                else {
+                    // boundary is off edge
+                    // assume air R-value
+                    rBoundarySum += rAir;
+                    rBoundarySize ++;
+                    }
+                }
+            }
+        }
+
+    
+    // floor counts as boundary too
+    // 4x its effect (seems more important than one of 8 walls
+    
+    // count non-air floor tiles while we're at it
+    int numFloorTilesInAirspace = 0;
+
+    if( numInAirspace > 0 ) {
+        for( int i=0; i<gridSize; i++ ) {
+            if( airSpaceGrid[i] ) {
+                rBoundarySum += 4 * rFloorGrid[i];
+                rBoundarySize += 4;
+                
+                if( rFloorGrid[i] > rAir ) {
+                    numFloorTilesInAirspace++;
+                    }
+                }
+            }
+        }
+    
+
+
+    float rBoundaryAverage = rAir;
+    
+    if( rBoundarySize > 0 ) {
+        rBoundaryAverage = rBoundarySum / rBoundarySize;
+        }
+
+    
+    
+
+
+
+    float airSpaceHeatSum = 0;
+    
+    for( int i=0; i<gridSize; i++ ) {
+        if( airSpaceGrid[i] ) {
+            airSpaceHeatSum += heatOutputGrid[i];
+            }
+        }
+
+
+    float airSpaceHeatVal = 0;
+    
+    if( numInAirspace > 0 ) {
+        // spread heat evenly over airspace
+        airSpaceHeatVal = airSpaceHeatSum / numInAirspace;
+        }
+
+    float containedAirSpaceHeatVal = airSpaceHeatVal * rBoundaryAverage;
+    
+
+
+    float radiantAirSpaceHeatVal = 0;
+
+    GridPos playerHeatMapPos = { playerMapIndex % HEAT_MAP_D, 
+                                 playerMapIndex / HEAT_MAP_D };
+    
+
+    int numRadiantHeatSources = 0;
+    
+    for( int i=0; i<gridSize; i++ ) {
+        if( airSpaceGrid[i] && heatOutputGrid[i] > 0 ) {
+            
+            int x = i % HEAT_MAP_D;
+            int y = i / HEAT_MAP_D;
+            
+            GridPos heatPos = { x, y };
+            
+
+            double d = distance( playerHeatMapPos, heatPos );
+            
+            // avoid infinite heat when player standing on source
+
+            radiantAirSpaceHeatVal += heatOutputGrid[ i ] / ( 1.5 * d + 1 );
+            numRadiantHeatSources ++;
+            }
+        }
+    
+
+    float biomeHeatWeight = 1;
+    float radiantHeatWeight = 1;
+    
+    float containedHeatWeight = 4;
+
+
+    // boundary r-value also limits affect of biome heat on player's
+    // environment... keeps biome "out"
+    float boundaryLeak = 1 - rBoundaryAverage;
+
+    if( numFloorTilesInAirspace != numInAirspace ) {
+        // biome heat invades airspace if entire thing isn't covered by
+        // a floor (not really indoors)
+        boundaryLeak = 1;
+        }
+
+
+    // a hot biome only pulls us up above perfect
+    // (hot biome leaking into a building can never make the building
+    //  just right).
+    // Enclosed walls can make a hot biome not as hot, but never cool
+    float biomeHeat = getBiomeHeatValue( getMapBiome( pos.x, pos.y ) );
+    
+    if( biomeHeat > targetHeat ) {
+        biomeHeat = boundaryLeak * (biomeHeat - targetHeat) + targetHeat;
+        }
+    else if( biomeHeat < 0 ) {
+        // a cold biome's coldness is modulated directly by walls, however
+        biomeHeat = boundaryLeak * biomeHeat;
+        }
+    
+    // small offset to ensure that naked-on-green biome the same
+    // in new heat model as old
+    float constHeatValue = 1.1;
+
+    inPlayer->envHeat = 
+        radiantHeatWeight * radiantAirSpaceHeatVal + 
+        containedHeatWeight * containedAirSpaceHeatVal +
+        biomeHeatWeight * biomeHeat +
+        constHeatValue;
+
+    inPlayer->biomeHeat = biomeHeat + constHeatValue;
+    }
+
+
+
+
+typedef struct MoveRecord {
+    char *formatString;
+    int absoluteX, absoluteY;
+    } MoveRecord;
+
+
+
+// formatString in returned record destroyed by caller
+MoveRecord getMoveRecord( LiveObject *inPlayer,
+                          char inNewMovesOnly,
+                          SimpleVector<ChangePosition> *inChangeVector = 
+                          NULL ) {
+
+    MoveRecord r;
+    
+    // p_id xs ys xd yd fraction_done eta_sec
+    
+    double deltaSec = Time::getCurrentTime() - inPlayer->moveStartTime;
+    
+    double etaSec = inPlayer->moveTotalSeconds - deltaSec;
+    
+    if( etaSec < 0 ) {
+        etaSec = 0;
+        }
+
+    
+    r.absoluteX = inPlayer->xs;
+    r.absoluteY = inPlayer->ys;
+            
+            
+    SimpleVector<char> messageLineBuffer;
+    
+    // start is absolute
+    char *startString = autoSprintf( "%d %%d %%d %.3f %.3f %d", 
+                                     inPlayer->id, 
+                                     inPlayer->moveTotalSeconds, etaSec,
+                                     inPlayer->pathTruncated );
+    // mark that this has been sent
+    inPlayer->pathTruncated = false;
+
+    if( inNewMovesOnly ) {
+        inPlayer->newMove = false;
+        }
+
+            
+    messageLineBuffer.appendElementString( startString );
+    delete [] startString;
+            
+    for( int p=0; p<inPlayer->pathLength; p++ ) {
+                // rest are relative to start
+        char *stepString = autoSprintf( " %d %d", 
+                                        inPlayer->pathToDest[p].x
+                                        - inPlayer->xs,
+                                        inPlayer->pathToDest[p].y
+                                        - inPlayer->ys );
+        
+        messageLineBuffer.appendElementString( stepString );
+        delete [] stepString;
+        }
+    
+    messageLineBuffer.appendElementString( "\n" );
+    
+    r.formatString = messageLineBuffer.getElementString();    
+    
+    if( inChangeVector != NULL ) {
+        ChangePosition p = { inPlayer->xd, inPlayer->yd, false };
+        inChangeVector->push_back( p );
+        }
+
+    return r;
+    }
+
+
+
+SimpleVector<MoveRecord> getMoveRecords( 
+    char inNewMovesOnly,
+    SimpleVector<ChangePosition> *inChangeVector = NULL ) {
+    
+    SimpleVector<MoveRecord> v;
+    
     int numPlayers = players.size();
                 
-    
-    int numLines = 0;
-
     for( int i=0; i<numPlayers; i++ ) {
                 
         LiveObject *o = players.getElement( i );                
@@ -1453,70 +2636,42 @@ char *getMovesMessage( char inNewMovesOnly,
 
         if( ( o->xd != o->xs || o->yd != o->ys )
             &&
-            ( o->newMove || !inNewMovesOnly ) 
-            && ( inOneIDOnly == -1 || inOneIDOnly == o->id ) ) {
-
+            ( o->newMove || !inNewMovesOnly ) ) {
+            
  
-            // p_id xs ys xd yd fraction_done eta_sec
+            MoveRecord r = getMoveRecord( o, inNewMovesOnly, inChangeVector );
             
-            double deltaSec = Time::getCurrentTime() - o->moveStartTime;
-            
-            double etaSec = o->moveTotalSeconds - deltaSec;
-            
-            if( etaSec < 0 ) {
-                etaSec = 0;
-                }
-
-            if( inNewMovesOnly ) {
-                o->newMove = false;
-                }
-            
-            
-            
-            SimpleVector<char> messageLineBuffer;
-        
-            // start is absolute
-            char *startString = autoSprintf( "%d %d %d %.3f %.3f %d", 
-                                             o->id, 
-                                             o->xs, o->ys, 
-                                             o->moveTotalSeconds, etaSec,
-                                             o->pathTruncated );
-            // mark that this has been sent
-            o->pathTruncated = false;
-            
-            messageLineBuffer.appendElementString( startString );
-            delete [] startString;
-            
-            for( int p=0; p<o->pathLength; p++ ) {
-                // rest are relative to start
-                char *stepString = autoSprintf( " %d %d", 
-                                                o->pathToDest[p].x
-                                                - o->xs,
-                                                o->pathToDest[p].y
-                                                - o->ys );
-                
-                messageLineBuffer.appendElementString( stepString );
-                delete [] stepString;
-                }
-        
-            messageLineBuffer.appendElementString( "\n" );
-
-            char *messageLine = messageLineBuffer.getElementString();
-                                    
-            messageBuffer.appendElementString( messageLine );
-            delete [] messageLine;
-            
-            if( inChangeVector != NULL ) {
-                ChangePosition p = { o->xd, o->yd, false };
-                inChangeVector->push_back( p );
-                }
-
-            numLines ++;
-            
+            v.push_back( r );
             }
         }
+
+    return v;
+    }
+
+
+
+char *getMovesMessageFromList( SimpleVector<MoveRecord> *inMoves,
+                               GridPos inRelativeToPos ) {
+
+    int numLines = 0;
     
+    SimpleVector<char> messageBuffer;
+
+    messageBuffer.appendElementString( "PM\n" );
+
+    for( int i=0; i<inMoves->size(); i++ ) {
+        MoveRecord r = inMoves->getElementDirect(i);
         
+        char *line = autoSprintf( r.formatString, 
+                                  r.absoluteX - inRelativeToPos.x,
+                                  r.absoluteY - inRelativeToPos.y );
+        
+        messageBuffer.appendElementString( line );
+        delete [] line;
+        
+        numLines ++;
+        }
+    
     if( numLines > 0 ) {
         
         messageBuffer.push_back( '#' );
@@ -1527,7 +2682,28 @@ char *getMovesMessage( char inNewMovesOnly,
         }
     
     return NULL;
+    }
+
     
+    
+    
+// returns NULL if there are no matching moves
+// positions in moves relative to inRelativeToPos
+char *getMovesMessage( char inNewMovesOnly,
+                       GridPos inRelativeToPos,
+                       SimpleVector<ChangePosition> *inChangeVector = NULL ) {
+    
+    
+    SimpleVector<MoveRecord> v = getMoveRecords( inNewMovesOnly, 
+                                                 inChangeVector );
+    
+    char *message = getMovesMessageFromList( &v, inRelativeToPos );
+    
+    for( int i=0; i<v.size(); i++ ) {
+        delete [] v.getElement(i)->formatString;
+        }
+    
+    return message;
     }
 
 
@@ -1576,11 +2752,6 @@ static char equal( GridPos inA, GridPos inB ) {
     }
 
 
-static double distance( GridPos inA, GridPos inB ) {
-    return sqrt( ( inA.x - inB.x ) * ( inA.x - inB.x )
-                 +
-                 ( inA.y - inB.y ) * ( inA.y - inB.y ) );
-    }
 
 
 
@@ -1629,6 +2800,35 @@ static int getMaxChunkDimension() {
     }
 
 
+static SocketPoll sockPoll;
+
+
+
+static void setPlayerDisconnected( LiveObject *inPlayer, 
+                                   const char *inReason ) {    
+    /*
+    setDeathReason( inPlayer, "disconnected" );
+    
+    inPlayer->error = true;
+    inPlayer->errorCauseString = inReason;
+    */
+    // don't kill them
+    
+    // just mark them as not connected
+
+    AppLog::infoF( "Player %d (%s) marked as disconnected.",
+                   inPlayer->id, inPlayer->email );
+    inPlayer->connected = false;
+
+    // when player reconnects, they won't get a force PU message
+    // so we shouldn't be waiting for them to ack
+    inPlayer->waitingForForceResponse = false;
+
+    // also, stop polling their socket, which will trigger constant
+    // socket events from here on out, and cause us to busy-loop
+    sockPoll.removeSocket( inPlayer->sock );
+    }
+
 
 
 // sets lastSentMap in inO if chunk goes through
@@ -1638,6 +2838,11 @@ int sendMapChunkMessage( LiveObject *inO,
                          int inDestOverrideX = 0, 
                          int inDestOverrideY = 0 ) {
     
+    if( ! inO->connected ) {
+        // act like it was a successful send so we can move on until
+        // they reconnect later
+        return 1;
+        }
     
     int messageLength = 0;
 
@@ -1669,6 +2874,7 @@ int sendMapChunkMessage( LiveObject *inO,
                                                           fullStartY,
                                                           chunkDimensionX,
                                                           chunkDimensionY,
+                                                          inO->birthPos,
                                                           &messageLength );
                 
         numSent += 
@@ -1737,6 +2943,7 @@ int sendMapChunkMessage( LiveObject *inO,
                                                               horBarStartY,
                                                               horBarW,
                                                               horBarH,
+                                                              inO->birthPos,
                                                               &len );
             messageLength += len;
             
@@ -1753,6 +2960,7 @@ int sendMapChunkMessage( LiveObject *inO,
                                                               vertBarStartY,
                                                               vertBarW,
                                                               vertBarH,
+                                                              inO->birthPos,
                                                               &len );
             messageLength += len;
             
@@ -1766,6 +2974,7 @@ int sendMapChunkMessage( LiveObject *inO,
         }
     
     
+    inO->gotPartOfThisFrame = true;
                 
 
     if( numSent == messageLength ) {
@@ -1774,10 +2983,7 @@ int sendMapChunkMessage( LiveObject *inO,
         inO->lastSentMapY = yd;
         }
     else {
-        setDeathReason( inO, "disconnected" );
-        
-        inO->error = true;
-        inO->errorCauseString = "Socket write failed";
+        setPlayerDisconnected( inO, "Socket write failed" );
         }
     return numSent;
     }
@@ -1785,8 +2991,8 @@ int sendMapChunkMessage( LiveObject *inO,
 
 
 double intDist( int inXA, int inYA, int inXB, int inYB ) {
-    int dx = inXA - inXB;
-    int dy = inYA - inYB;
+    double dx = (double)inXA - (double)inXB;
+    double dy = (double)inYA - (double)inYB;
 
     return sqrt(  dx * dx + dy * dy );
     }
@@ -1795,15 +3001,19 @@ double intDist( int inXA, int inYA, int inXB, int inYB ) {
 
 
 char *getHoldingString( LiveObject *inObject ) {
+    
+    int holdingID = hideIDForClient( inObject->holdingID );    
+
+
     if( inObject->numContained == 0 ) {
-        return autoSprintf( "%d", inObject->holdingID );
+        return autoSprintf( "%d", holdingID );
         }
 
     
     SimpleVector<char> buffer;
     
 
-    char *idString = autoSprintf( "%d", inObject->holdingID );
+    char *idString = autoSprintf( "%d", holdingID );
     
     buffer.appendElementString( idString );
     
@@ -1813,8 +3023,9 @@ char *getHoldingString( LiveObject *inObject ) {
     if( inObject->numContained > 0 ) {
         for( int i=0; i<inObject->numContained; i++ ) {
             
-            char *idString = autoSprintf( ",%d", 
-                                          abs( inObject->containedIDs[i] ) );
+            char *idString = autoSprintf( 
+                ",%d", 
+                hideIDForClient( abs( inObject->containedIDs[i] ) ) );
     
             buffer.appendElementString( idString );
     
@@ -1825,7 +3036,9 @@ char *getHoldingString( LiveObject *inObject ) {
                     
                     idString = autoSprintf( 
                         ":%d", 
-                        inObject->subContainedIDs[i].getElementDirect( s ) );
+                        hideIDForClient( 
+                            inObject->subContainedIDs[i].
+                            getElementDirect( s ) ) );
     
                     buffer.appendElementString( idString );
                 
@@ -1892,7 +3105,7 @@ static void setFreshEtaDecayForHeld( LiveObject *inPlayer ) {
         }
     
     // does newly-held object have a decay defined?
-    TransRecord *newDecayT = getTrans( -1, inPlayer->holdingID );
+    TransRecord *newDecayT = getMetaTrans( -1, inPlayer->holdingID );
                     
     if( newDecayT != NULL ) {
         inPlayer->holdingEtaDecay = 
@@ -1990,7 +3203,9 @@ void handleMapChangeToPaths(
                                                otherPlayer->pathToDest,
                                                c );
                             
-                        double moveSpeed = computeMoveSpeed( otherPlayer );
+                        double moveSpeed = computeMoveSpeed( otherPlayer ) *
+                            getPathSpeedModifier( otherPlayer->pathToDest,
+                                                  otherPlayer->pathLength );
 
                         otherPlayer->moveTotalSeconds 
                             = 
@@ -2173,9 +3388,193 @@ char findDropSpot( int inX, int inY, int inSourceX, int inSourceY,
 
 
 
+#include "spiral.h"
+
+GridPos findClosestEmptyMapSpot( int inX, int inY, int inMaxPointsToCheck,
+                                 char *outFound ) {
+
+    GridPos center = { inX, inY };
+
+    for( int i=0; i<inMaxPointsToCheck; i++ ) {
+        GridPos p = getSpriralPoint( center, i );
+
+        if( isMapSpotEmpty( p.x, p.y, false ) ) {    
+            *outFound = true;
+            return p;
+            }
+        }
+    
+    *outFound = false;
+    GridPos p = { inX, inY };
+    return p;
+    }
+
+
+
+
+
+SimpleVector<char> newSpeech;
+SimpleVector<ChangePosition> newSpeechPos;
+
+
+SimpleVector<char*> newLocationSpeech;
+SimpleVector<ChangePosition> newLocationSpeechPos;
+
+
+
+
+char *isCurseNamingSay( char *inSaidString );
+
+
+static void makePlayerSay( LiveObject *inPlayer, char *inToSay ) {    
+                        
+    if( inPlayer->lastSay != NULL ) {
+        delete [] inPlayer->lastSay;
+        inPlayer->lastSay = NULL;
+        }
+    inPlayer->lastSay = stringDuplicate( inToSay );
+                        
+
+    char isCurse = false;
+
+    char *cursedName = isCurseNamingSay( inToSay );
+                        
+    if( cursedName != NULL && 
+        strcmp( cursedName, "" ) != 0 ) {
+        
+        isCurse = cursePlayer( inPlayer->id,
+                               inPlayer->email,
+                               cursedName );
+        
+        if( isCurse ) {
+            
+            if( hasCurseToken( inPlayer->email ) ) {
+                inPlayer->curseTokenCount = 1;
+                }
+            else {
+                inPlayer->curseTokenCount = 0;
+                }
+            inPlayer->curseTokenUpdate = true;
+            }
+        }
+
+
+    int curseFlag = 0;
+    if( isCurse ) {
+        curseFlag = 1;
+        }
+
+    
+    char *line = autoSprintf( "%d/%d %s\n", 
+                              inPlayer->id,
+                              curseFlag,
+                              inToSay );
+                        
+    newSpeech.appendElementString( line );
+                        
+    delete [] line;
+                        
+
+                        
+    ChangePosition p = { inPlayer->xd, inPlayer->yd, false };
+                        
+    // if held, speech happens where held
+    if( inPlayer->heldByOther ) {
+        LiveObject *holdingPlayer = 
+            getLiveObject( inPlayer->heldByOtherID );
+                
+        if( holdingPlayer != NULL ) {
+            p.x = holdingPlayer->xd;
+            p.y = holdingPlayer->yd;
+            }
+        }
+
+    newSpeechPos.push_back( p );
+
+
+
+    SimpleVector<int> pipesIn;
+    GridPos playerPos = getPlayerPos( inPlayer );
+    
+    getSpeechPipesIn( playerPos.x, playerPos.y, &pipesIn );
+    
+    if( pipesIn.size() > 0 ) {
+        for( int p=0; p<pipesIn.size(); p++ ) {
+            int pipeIndex = pipesIn.getElementDirect( p );
+
+            SimpleVector<GridPos> *pipesOut = getSpeechPipesOut( pipeIndex );
+
+            for( int i=0; i<pipesOut->size(); i++ ) {
+                GridPos outPos = pipesOut->getElementDirect( i );
+                
+                newLocationSpeech.push_back( stringDuplicate( inToSay ) );
+                
+                ChangePosition outChangePos = { outPos.x, outPos.y, false };
+                newLocationSpeechPos.push_back( outChangePos );
+                }
+            }
+        }
+    }
+
+
+
+static void holdingSomethingNew( LiveObject *inPlayer, 
+                                 int inOldHoldingID = 0 ) {
+    if( inPlayer->holdingID > 0 ) {
+       
+        ObjectRecord *o = getObject( inPlayer->holdingID );
+        
+        ObjectRecord *oldO = NULL;
+        if( inOldHoldingID > 0 ) {
+            oldO = getObject( inOldHoldingID );
+            }
+        
+        if( o->written &&
+            ( oldO == NULL ||
+              ! ( oldO->written || oldO->writable ) ) ) {
+            
+            char metaData[ MAP_METADATA_LENGTH ];
+            char found = getMetadata( inPlayer->holdingID, 
+                                      (unsigned char*)metaData );
+
+            if( found ) {
+                // read what they picked up, subject to limit
+                
+                unsigned int sayLimit = getSayLimit( inPlayer );
+                        
+                if( computeAge( inPlayer ) < 10 &&
+                    strlen( metaData ) > sayLimit ) {
+                    // truncate with ...
+                    metaData[ sayLimit ] = '.';
+                    metaData[ sayLimit + 1 ] = '.';
+                    metaData[ sayLimit + 2 ] = '.';
+                    metaData[ sayLimit + 3 ] = '\0';
+                    }
+                char *quotedPhrase = autoSprintf( ":%s", metaData );
+                makePlayerSay( inPlayer, quotedPhrase );
+                delete [] quotedPhrase;
+                }
+            }
+
+        if( o->isFlying ) {
+            inPlayer->holdingFlightObject = true;
+            }
+        else {
+            inPlayer->holdingFlightObject = false;
+            }
+        }
+    else {
+        inPlayer->holdingFlightObject = false;
+        }
+    }
+
+
+
+
 // drops an object held by a player at target x,y location
 // doesn't check for adjacency (so works for thrown drops too)
 // if target spot blocked, will search for empty spot to throw object into
+// if inPlayerIndicesToSendUpdatesAbout is NULL, it is ignored
 void handleDrop( int inX, int inY, LiveObject *inDroppingPlayer,
                  SimpleVector<int> *inPlayerIndicesToSendUpdatesAbout ) {
     
@@ -2207,6 +3606,34 @@ void handleDrop( int inX, int inY, LiveObject *inDroppingPlayer,
             
             inDroppingPlayer->holdingID = 
                 bareTrans->newTarget;
+            holdingSomethingNew( inDroppingPlayer, oldHoldingID );
+
+            setFreshEtaDecayForHeld( inDroppingPlayer );
+            }
+        }
+    else if( oldHoldingID > 0 &&
+             ! getObject( oldHoldingID )->permanent ) {
+        // what they are holding is NOT stuck in their
+        // hand
+
+        // see if a use-on-bare-ground drop 
+        // action applies (example:  getting wounded while holding a goose)
+                            
+        // do not consider doing this if use-on-bare-ground leaves something
+        // in the hand
+
+        TransRecord *bareTrans =
+            getPTrans( oldHoldingID, -1 );
+                            
+        if( bareTrans != NULL &&
+            bareTrans->newTarget > 0 &&
+            bareTrans->newActor == 0 ) {
+                            
+            oldHoldingID = bareTrans->newTarget;
+            
+            inDroppingPlayer->holdingID = 
+                bareTrans->newTarget;
+            holdingSomethingNew( inDroppingPlayer, oldHoldingID );
 
             setFreshEtaDecayForHeld( inDroppingPlayer );
             }
@@ -2232,9 +3659,11 @@ void handleDrop( int inX, int inY, LiveObject *inDroppingPlayer,
                                     
         
         GridPos spot;
+
+        GridPos playerPos = getPlayerPos( inDroppingPlayer );
         
         char found = findDropSpot( inX, inY, 
-                                   inDroppingPlayer->xd, inDroppingPlayer->yd,
+                                   playerPos.x, playerPos.y,
                                    &spot );
         
         int foundX = spot.x;
@@ -2272,8 +3701,11 @@ void handleDrop( int inX, int inY, LiveObject *inDroppingPlayer,
                             computeFoodDecrementTimeSeconds( babyO );
                         }
                     
-                    inPlayerIndicesToSendUpdatesAbout->push_back( 
-                        getLiveObjectIndex( babyID ) );
+                    if( inPlayerIndicesToSendUpdatesAbout != NULL ) {    
+                        inPlayerIndicesToSendUpdatesAbout->push_back( 
+                            getLiveObjectIndex( babyID ) );
+                        }
+                    
                     }
                 
                 }
@@ -2308,7 +3740,15 @@ void handleDrop( int inX, int inY, LiveObject *inDroppingPlayer,
             babyO->ys = targetY;
             
             babyO->heldByOther = false;
-
+            
+            // force baby pos
+            // baby can wriggle out of arms in same server step that it was
+            // picked up.  In that case, the clients will never get the
+            // message that the baby was picked up.  The baby client could
+            // be in the middle of a client-side move, and we need to force
+            // them back to their true position.
+            babyO->posForced = true;
+            
             if( isFertileAge( inDroppingPlayer ) ) {    
                 // reset food decrement time
                 babyO->foodDecrementETASeconds =
@@ -2316,8 +3756,10 @@ void handleDrop( int inX, int inY, LiveObject *inDroppingPlayer,
                     computeFoodDecrementTimeSeconds( babyO );
                 }
 
-            inPlayerIndicesToSendUpdatesAbout->push_back( 
-                getLiveObjectIndex( babyID ) );
+            if( inPlayerIndicesToSendUpdatesAbout != NULL ) {
+                inPlayerIndicesToSendUpdatesAbout->push_back( 
+                    getLiveObjectIndex( babyID ) );
+                }
             }
         
         inDroppingPlayer->holdingID = 0;
@@ -2353,8 +3795,11 @@ void handleDrop( int inX, int inY, LiveObject *inDroppingPlayer,
             
     ObjectRecord *droppedObject = getObject( oldHoldingID );
    
-    handleMapChangeToPaths( targetX, targetY, droppedObject,
-                            inPlayerIndicesToSendUpdatesAbout );
+    if( inPlayerIndicesToSendUpdatesAbout != NULL ) {    
+        handleMapChangeToPaths( targetX, targetY, droppedObject,
+                                inPlayerIndicesToSendUpdatesAbout );
+        }
+    
     
     }
 
@@ -2421,58 +3866,65 @@ void handleForcedBabyDrop(
 
 
 
+static void handleHoldingChange( LiveObject *inPlayer, int inNewHeldID );
 
-char isMapSpotBlocking( int inX, int inY ) {
-    
-    int target = getMapObject( inX, inY );
 
-    if( target != 0 ) {
-        ObjectRecord *obj = getObject( target );
+
+static void swapHeldWithGround( 
+    LiveObject *inPlayer, int inTargetID, 
+    int inMapX, int inMapY,
+    SimpleVector<int> *inPlayerIndicesToSendUpdatesAbout) {
+
+    timeSec_t newHoldingEtaDecay = getEtaDecay( inMapX, inMapY );
     
-        if( obj->blocksWalking ) {
-            return true;
-            }
-        }
+    FullMapContained f = getFullMapContained( inMapX, inMapY );
     
-    // not directly blocked
-    // need to check for wide objects to left and right
-    int maxR = getMaxWideRadius();
     
-    for( int dx = -maxR; dx <= maxR; dx++ ) {
-        
-        if( dx != 0 ) {
-            
-            int nX = inX + dx;
-        
-            int nID = getMapObject( nX, inY );
-            
-            if( nID != 0 ) {
-                ObjectRecord *nO = getObject( nID );
+    clearAllContained( inMapX, inMapY );
+    setMapObject( inMapX, inMapY, 0 );
+    
+    handleDrop( inMapX, inMapY, inPlayer, inPlayerIndicesToSendUpdatesAbout );
+    
+    
+    inPlayer->holdingID = inTargetID;
+    inPlayer->holdingEtaDecay = newHoldingEtaDecay;
+    
+    setContained( inPlayer, f );
+
+
+    // does bare-hand action apply to this newly-held object
+    // one that results in something new in the hand and
+    // nothing on the ground?
+    
+    // if so, it is a pick-up action, and it should apply here
+    
+    TransRecord *pickupTrans = getPTrans( 0, inTargetID );
+
+    char newHandled = false;
                 
-                if( nO->wide ) {
+    if( pickupTrans != NULL && pickupTrans->newActor > 0 &&
+        pickupTrans->newTarget == 0 ) {
                     
-                    int dist;
-                    int minDist;
-                    
-                    if( dx < 0 ) {
-                        dist = -dx;
-                        minDist = nO->rightBlockingRadius;
-                        }
-                    else {
-                        dist = dx;
-                        minDist = nO->leftBlockingRadius;
-                        }
-                    
-                    if( dist <= minDist ) {
-                        return true;
-                        }
-                    }
-                }
+        int newTargetID = pickupTrans->newActor;
+        
+        if( newTargetID != inTargetID ) {
+            handleHoldingChange( inPlayer, newTargetID );
+            newHandled = true;
             }
         }
     
-    return false;
+    if( ! newHandled ) {
+        holdingSomethingNew( inPlayer );
+        }
+    
+    inPlayer->heldOriginValid = 1;
+    inPlayer->heldOriginX = inMapX;
+    inPlayer->heldOriginY = inMapY;
+    inPlayer->heldTransitionSourceID = -1;
     }
+
+
+
 
 
 
@@ -2490,31 +3942,130 @@ static int objectRecordToID( ObjectRecord *inRecord ) {
     }
 
 
-// inDelete true to send X X for position
-// inPartial gets update line for player's current possition mid-path
-static char *getUpdateLine( LiveObject *inPlayer, char inDelete,
-                            char inPartial = false ) {
+
+typedef struct UpdateRecord{
+        char *formatString;
+        char posUsed;
+        int absolutePosX, absolutePosY;
+        GridPos absoluteActionTarget;
+        int absoluteHeldOriginX, absoluteHeldOriginY;
+    } UpdateRecord;
+
+
+
+static char *getUpdateLineFromRecord( 
+    UpdateRecord *inRecord, GridPos inRelativeToPos ) {
+    
+    if( inRecord->posUsed ) {
+        return autoSprintf( inRecord->formatString,
+                            inRecord->absoluteActionTarget.x 
+                            - inRelativeToPos.x,
+                            inRecord->absoluteActionTarget.y 
+                            - inRelativeToPos.y,
+                            inRecord->absoluteHeldOriginX - inRelativeToPos.x, 
+                            inRecord->absoluteHeldOriginY - inRelativeToPos.y,
+                            inRecord->absolutePosX - inRelativeToPos.x, 
+                            inRecord->absolutePosY - inRelativeToPos.y );
+        }
+    else {
+        return autoSprintf( inRecord->formatString,
+                            inRecord->absoluteActionTarget.x 
+                            - inRelativeToPos.x,
+                            inRecord->absoluteActionTarget.y 
+                            - inRelativeToPos.y,
+                            inRecord->absoluteHeldOriginX - inRelativeToPos.x, 
+                            inRecord->absoluteHeldOriginY - inRelativeToPos.y );
+        }
+    }
+
+
+
+static char isYummy( LiveObject *inPlayer, int inObjectID ) {
+    ObjectRecord *o = getObject( inObjectID );
+    
+    if( o->isUseDummy ) {
+        inObjectID = o->useDummyParent;
+        o = getObject( inObjectID );
+        }
+
+    if( o->foodValue == 0 ) {
+        return false;
+        }
+
+    for( int i=0; i<inPlayer->yummyFoodChain.size(); i++ ) {
+        if( inObjectID == inPlayer->yummyFoodChain.getElementDirect(i) ) {
+            return false;
+            }
+        }
+    return true;
+    }
+
+
+
+static void updateYum( LiveObject *inPlayer, int inFoodEatenID ) {
+
+    if( ! isYummy( inPlayer, inFoodEatenID ) ) {
+        // chain broken
+        inPlayer->yummyFoodChain.deleteAll();
+        }
+    
+    
+    ObjectRecord *o = getObject( inFoodEatenID );
+    
+    if( o->isUseDummy ) {
+        inFoodEatenID = o->useDummyParent;
+        }
+    
+    
+    // add to chain
+    // might be starting a new chain
+    inPlayer->yummyFoodChain.push_back( inFoodEatenID );
+
+
+    int currentBonus = inPlayer->yummyFoodChain.size() - 1;
+
+    if( currentBonus < 0 ) {
+        currentBonus = 0;
+        }    
+
+    inPlayer->yummyBonusStore += currentBonus;
+    }
+
+
+
+
+
+static UpdateRecord getUpdateRecord( 
+    LiveObject *inPlayer,
+    char inDelete,
+    char inPartial = false ) {
 
     char *holdingString = getHoldingString( inPlayer );
     
+    // this is 0 if still in motion (mid-move update)
     int doneMoving = 0;
     
     if( inPlayer->xs == inPlayer->xd &&
         inPlayer->ys == inPlayer->yd &&
         ! inPlayer->heldByOther ) {
-        doneMoving = 1;
+        // not moving
+        doneMoving = inPlayer->lastMoveSequenceNumber;
         }
     
+    UpdateRecord r;
         
 
     char *posString;
     if( inDelete ) {
         posString = stringDuplicate( "0 0 X X" );
+        r.posUsed = false;
         }
     else {
         int x, y;
 
-        if( doneMoving || ! inPartial ) {
+        r.posUsed = true;
+
+        if( doneMoving > 0 || ! inPartial ) {
             x = inPlayer->xs;
             y = inPlayer->ys;
             }
@@ -2526,11 +4077,11 @@ static char *getUpdateLine( LiveObject *inPlayer, char inDelete,
             y = p.y;
             }
         
-        posString = autoSprintf( "%d %d %d %d",          
+        posString = autoSprintf( "%d %d %%d %%d",          
                                  doneMoving,
-                                 inPlayer->posForced,
-                                 x, 
-                                 y );
+                                 inPlayer->posForced );
+        r.absolutePosX = x;
+        r.absolutePosY = y;
         }
     
     SimpleVector<char> clothingListBuffer;
@@ -2543,7 +4094,7 @@ static char *getUpdateLine( LiveObject *inPlayer, char inDelete,
             id = objectRecordToID( cObj );
             }
         
-        char *idString = autoSprintf( "%d", id );
+        char *idString = autoSprintf( "%d", hideIDForClient( id ) );
         
         clothingListBuffer.appendElementString( idString );
         delete [] idString;
@@ -2554,7 +4105,10 @@ static char *getUpdateLine( LiveObject *inPlayer, char inDelete,
                 char *contString = 
                     autoSprintf( 
                         ",%d", 
-                        inPlayer->clothingContained[c].getElementDirect( cc ) );
+                        hideIDForClient( 
+                            inPlayer->
+                            clothingContained[c].getElementDirect( cc ) ) );
+                
                 clothingListBuffer.appendElementString( contString );
                 delete [] contString;
                 }
@@ -2568,27 +4122,38 @@ static char *getUpdateLine( LiveObject *inPlayer, char inDelete,
     char *clothingList = clothingListBuffer.getElementString();
 
 
-    const char *deathReason = "";
+    char *deathReason;
     
     if( inDelete && inPlayer->deathReason != NULL ) {
-        deathReason = inPlayer->deathReason;
+        deathReason = stringDuplicate( inPlayer->deathReason );
+        }
+    else {
+        deathReason = stringDuplicate( "" );
         }
     
+    
+    int heldYum = 0;
+    
+    if( inPlayer->holdingID > 0 &&
+        isYummy( inPlayer, inPlayer->holdingID ) ) {
+        heldYum = 1;
+        }
 
-    char *updateLine = autoSprintf( 
-        "%d %d %d %d %d %d %s %d %d %d %d "
-        "%.2f %s %.2f %.2f %.2f %s %d %d %d%s\n",
+
+    r.formatString = autoSprintf( 
+        "%d %d %d %d %%d %%d %s %d %%d %%d %d "
+        "%.2f %s %.2f %.2f %.2f %s %d %d %d %d%s\n",
         inPlayer->id,
         inPlayer->displayID,
         inPlayer->facingOverride,
         inPlayer->actionAttempt,
-        inPlayer->actionTarget.x,
-        inPlayer->actionTarget.y,
+        //inPlayer->actionTarget.x - inRelativeToPos.x,
+        //inPlayer->actionTarget.y - inRelativeToPos.y,
         holdingString,
         inPlayer->heldOriginValid,
-        inPlayer->heldOriginX,
-        inPlayer->heldOriginY,
-        inPlayer->heldTransitionSourceID,
+        //inPlayer->heldOriginX - inRelativeToPos.x,
+        //inPlayer->heldOriginY - inRelativeToPos.y,
+        hideIDForClient( inPlayer->heldTransitionSourceID ),
         inPlayer->heat,
         posString,
         computeAge( inPlayer ),
@@ -2596,10 +4161,33 @@ static char *getUpdateLine( LiveObject *inPlayer, char inDelete,
         computeMoveSpeed( inPlayer ),
         clothingList,
         inPlayer->justAte,
-        inPlayer->justAteID,
+        hideIDForClient( inPlayer->justAteID ),
         inPlayer->responsiblePlayerID,
+        heldYum,
         deathReason );
     
+    delete [] deathReason;
+    
+
+    r.absoluteActionTarget = inPlayer->actionTarget;
+    
+    if( inPlayer->heldOriginValid ) {
+        r.absoluteHeldOriginX = inPlayer->heldOriginX;
+        r.absoluteHeldOriginY = inPlayer->heldOriginY;
+        }
+    else {
+        // we set 0,0 to clear held origins in many places in the code
+        // if we leave that as an absolute pos, our birth pos leaks through
+        // when we make it birth-pos relative
+        
+        // instead, substitute our birth pos for all invalid held pos coords
+        // to prevent this
+        r.absoluteHeldOriginX = inPlayer->birthPos.x;
+        r.absoluteHeldOriginY = inPlayer->birthPos.y;
+        }
+    
+        
+
     inPlayer->justAte = false;
     inPlayer->justAteID = 0;
     
@@ -2613,12 +4201,35 @@ static char *getUpdateLine( LiveObject *inPlayer, char inDelete,
     delete [] posString;
     delete [] clothingList;
     
-    return updateLine;
+    return r;
     }
 
 
 
+// inDelete true to send X X for position
+// inPartial gets update line for player's current possition mid-path
+// positions in update line will be relative to inRelativeToPos
+static char *getUpdateLine( LiveObject *inPlayer, GridPos inRelativeToPos,
+                            char inDelete,
+                            char inPartial = false ) {
+    
+    UpdateRecord r = getUpdateRecord( inPlayer, inDelete, inPartial );
+    
+    char *line = getUpdateLineFromRecord( &r, inRelativeToPos );
+
+    delete [] r.formatString;
+    
+    return line;
+    }
+
+
+
+
+// if inTargetID set, we only detect whether inTargetID is close enough to
+// be hit
+// otherwise, we find the lowest-id player that is hit and return that
 static LiveObject *getHitPlayer( int inX, int inY,
+                                 int inTargetID = -1,
                                  char inCountMidPath = false,
                                  int inMaxAge = -1,
                                  int inMinAge = -1,
@@ -2636,7 +4247,12 @@ static LiveObject *getHitPlayer( int inX, int inY,
         if( otherPlayer->error ) {
             continue;
             }
-
+        
+        if( otherPlayer->heldByOther ) {
+            // ghost position of a held baby
+            continue;
+            }
+        
         if( inMaxAge != -1 &&
             computeAge( otherPlayer ) > inMaxAge ) {
             continue;
@@ -2644,6 +4260,11 @@ static LiveObject *getHitPlayer( int inX, int inY,
 
         if( inMinAge != -1 &&
             computeAge( otherPlayer ) < inMinAge ) {
+            continue;
+            }
+        
+        if( inTargetID != -1 &&
+            otherPlayer->id != inTargetID ) {
             continue;
             }
 
@@ -2715,13 +4336,83 @@ static LiveObject *getHitPlayer( int inX, int inY,
     
 
 
+
+// for placement of tutorials out of the way 
+static int maxPlacementX = 5000000;
+
+// tutorial is alwasy placed 400,000 to East of furthest birth/Eve
+// location
+static int tutorialOffsetX = 400000;
+
+
+// each subsequent tutorial gets put in a diferent place
+static int tutorialCount = 0;
+
         
 
-
-void processLoggedInPlayer( Socket *inSock,
-                            SimpleVector<char> *inSockBuffer,
-                            char *inEmail ) {
+// returns ID of new player,
+// or -1 if this player reconnected to an existing ID
+int processLoggedInPlayer( Socket *inSock,
+                           SimpleVector<char> *inSockBuffer,
+                           char *inEmail,
+                           int inTutorialNumber,
+                           CurseStatus inCurseStatus,
+                           // set to -2 to force Eve
+                           int inForceParentID = -1,
+                           int inForceDisplayID = -1,
+                           GridPos *inForcePlayerPos = NULL ) {
     
+    // see if player was previously disconnected
+    for( int i=0; i<players.size(); i++ ) {
+        LiveObject *o = players.getElement( i );
+        
+        if( ! o->error && ! o->connected &&
+            strcmp( o->email, inEmail ) == 0 ) {
+
+            
+            // give them this new socket and buffer
+            delete o->sock;
+            delete o->sockBuffer;
+            
+            o->sock = inSock;
+            o->sockBuffer = inSockBuffer;
+            
+            // they are connecting again, need to send them everything again
+            o->firstMapSent = false;
+            o->firstMessageSent = false;
+            o->inFlight = false;
+            
+            o->connected = true;
+            
+            if( o->heldByOther ) {
+                // they're held, so they may have moved far away from their
+                // original location
+                
+                // their first PU on reconnect should give an estimate of this
+                // new location
+                
+                LiveObject *holdingPlayer = 
+                    getLiveObject( o->heldByOtherID );
+                
+                if( holdingPlayer != NULL ) {
+                    o->xd = holdingPlayer->xd;
+                    o->yd = holdingPlayer->yd;
+                    
+                    o->xs = holdingPlayer->xs;
+                    o->ys = holdingPlayer->ys;
+                    }
+                }
+            
+            AppLog::infoF( "Player %d (%s) has reconnected.",
+                           o->id, o->email );
+
+            delete [] inEmail;
+            
+            return -1;
+            }
+        }
+             
+
     // reload these settings every time someone new connects
     // thus, they can be changed without restarting the server
     minFoodDecrementSeconds = 
@@ -2757,7 +4448,12 @@ void processLoggedInPlayer( Socket *inSock,
     newObject.displayID = getRandomPersonObject();
     
     newObject.isEve = false;
-
+    
+    newObject.isTutorial = false;
+    
+    if( inTutorialNumber > 0 ) {
+        newObject.isTutorial = true;
+        }
 
     newObject.trueStartTimeSeconds = Time::getCurrentTime();
     newObject.lifeStartTimeSeconds = newObject.trueStartTimeSeconds;
@@ -2789,11 +4485,17 @@ void processLoggedInPlayer( Socket *inSock,
     badMotherLimit = 9999999;
     
     
+    primeLineageTest( numPlayers );
+    
 
     for( int i=0; i<numPlayers; i++ ) {
         LiveObject *player = players.getElement( i );
         
         if( player->error ) {
+            continue;
+            }
+
+        if( player->isTutorial ) {
             continue;
             }
 
@@ -2808,6 +4510,12 @@ void processLoggedInPlayer( Socket *inSock,
             if( Time::timeSec() < player->birthCoolDown ) {    
                 canHaveBaby = false;
                 }
+            
+            if( ! isLinePermitted( newObject.email, player->lineageEveID ) ) {
+                // this line forbidden for new player
+                continue;
+                }
+            
 
             int numPastBabies = player->babyIDs->size();
             
@@ -2848,10 +4556,53 @@ void processLoggedInPlayer( Socket *inSock,
                 }
             
             if( canHaveBaby ) {
-                parentChoices.push_back( player );
+                if( ( inCurseStatus.curseLevel == 0 && 
+                      player->curseStatus.curseLevel == 0 ) 
+                    || 
+                    ( inCurseStatus.curseLevel > 0 && 
+                      player->curseStatus.curseLevel > 0 ) ) {
+                    // cursed babies only born to cursed mothers
+                    // non-cursed babies never born to cursed mothers
+                    parentChoices.push_back( player );
+                    }
                 }
             }
         }
+
+
+    char forceParentChoices = false;
+    
+
+    if( inTutorialNumber > 0 ) {
+        // Tutorial always played full-grown
+        parentChoices.deleteAll();
+        forceParentChoices = true;
+        }
+
+    if( inForceParentID == -2 ) {
+        // force eve
+        parentChoices.deleteAll();
+        forceParentChoices = true;
+        }
+    else if( inForceParentID > -1 ) {
+        // force parent choice
+        parentChoices.deleteAll();
+        
+        LiveObject *forcedParent = getLiveObject( inForceParentID );
+        
+        if( forcedParent != NULL ) {
+            parentChoices.push_back( forcedParent );
+            forceParentChoices = true;
+            }
+        }
+    
+    
+    if( SettingsManager::getIntSetting( "forceAllPlayersEve", 0 ) ) {
+        parentChoices.deleteAll();
+        forceParentChoices = true;
+        }
+    
+
 
     newObject.parentChainLength = 1;
 
@@ -2860,6 +4611,7 @@ void processLoggedInPlayer( Socket *inSock,
         // she starts almost full grown
 
         newObject.isEve = true;
+        newObject.lineageEveID = newObject.id;
         
         newObject.lifeStartTimeSeconds -= 14 * ( 1.0 / getAgeRate() );
 
@@ -2872,7 +4624,9 @@ void processLoggedInPlayer( Socket *inSock,
         }
     
 
-    if( numOfAge == 0 ) {
+    if( !forceParentChoices && 
+        parentChoices.size() == 0 && numOfAge == 0 && 
+        inCurseStatus.curseLevel == 0 ) {
         // all existing babies are good spawn spot for Eve
                     
         for( int i=0; i<numPlayers; i++ ) {
@@ -2896,15 +4650,34 @@ void processLoggedInPlayer( Socket *inSock,
     // else player starts as newborn
                 
 
+    newObject.foodCapModifier = 1.0;
+
+    newObject.fever = 0;
+
     // start full up to capacity with food
     newObject.foodStore = computeFoodCapacity( &newObject );
+
+    
 
     if( ! newObject.isEve ) {
         // babies start out almost starving
         newObject.foodStore = 2;
         }
+    
+    if( newObject.isTutorial && newObject.foodStore > 10 ) {
+        // so they can practice eating at the beginning of the tutorial
+        newObject.foodStore -= 6;
+        }
+    
 
+    newObject.envHeat = targetHeat;
+    newObject.bodyHeat = targetHeat;
+    newObject.biomeHeat = targetHeat;
+    newObject.lastBiomeHeat = targetHeat;
     newObject.heat = 0.5;
+    newObject.heatUpdate = false;
+    newObject.lastHeatUpdate = Time::getCurrentTime();
+    
 
     newObject.foodDecrementETASeconds =
         Time::getCurrentTime() + 
@@ -2916,6 +4689,8 @@ void processLoggedInPlayer( Socket *inSock,
     newObject.justAte = false;
     newObject.justAteID = 0;
     
+    newObject.yummyBonusStore = 0;
+
     newObject.clothing = getEmptyClothingSet();
 
     for( int c=0; c<NUM_CLOTHING_PIECES; c++ ) {
@@ -2928,12 +4703,16 @@ void processLoggedInPlayer( Socket *inSock,
     newObject.yd = 0;
     
     newObject.lastRegionLookTime = 0;
+    newObject.playerCrossingCheckTime = 0;
     
     
     LiveObject *parent = NULL;
-                
-    if( parentChoices.size() > 0 ) {
 
+    char placed = false;
+    
+    if( parentChoices.size() > 0 ) {
+        placed = true;
+        
         if( newObject.isEve ) {
             // spawned next to random existing player
             int parentIndex = 
@@ -2948,30 +4727,70 @@ void processLoggedInPlayer( Socket *inSock,
             // pick random mother from a weighted distribution based on 
             // each mother's temperature
             
+            // AND each mother's current YUM multiplier
+            
+            int maxYumMult = 1;
+
+            for( int i=0; i<parentChoices.size(); i++ ) {
+                LiveObject *p = parentChoices.getElementDirect( i );
+                
+                int yumMult = p->yummyFoodChain.size() - 1;
+                
+                if( yumMult < 0 ) {
+                    yumMult = 0;
+                    }
+                
+                if( yumMult > maxYumMult ) {
+                    maxYumMult = yumMult;
+                    }
+                }
             
             // 0.5 temp is worth .5 weight
             // 1.0 temp and 0 are worth 0 weight
             
-            double totalTemp = 0;
+            // max YumMult worth same that perfect temp is worth (0.5 weight)
+
+            double totalWeight = 0;
             
             for( int i=0; i<parentChoices.size(); i++ ) {
                 LiveObject *p = parentChoices.getElementDirect( i );
 
-                totalTemp += 0.5 - abs( p->heat - 0.5 );
+                // temp part of weight
+                totalWeight += 0.5 - fabs( p->heat - 0.5 );
+                
+
+                int yumMult = p->yummyFoodChain.size() - 1;
+                                
+                if( yumMult < 0 ) {
+                    yumMult = 0;
+                    }
+
+                // yum mult part of weight
+                totalWeight += 0.5 * yumMult / (double) maxYumMult;
                 }
 
             double choice = 
-                randSource.getRandomBoundedDouble( 0, totalTemp );
+                randSource.getRandomBoundedDouble( 0, totalWeight );
             
             
-            totalTemp = 0;
+            totalWeight = 0;
             
             for( int i=0; i<parentChoices.size(); i++ ) {
                 LiveObject *p = parentChoices.getElementDirect( i );
 
-                totalTemp += 0.5 - abs( p->heat - 0.5 );
-                
-                if( totalTemp >= choice ) {
+                totalWeight += 0.5 - fabs( p->heat - 0.5 );
+
+
+                int yumMult = p->yummyFoodChain.size() - 1;
+                                
+                if( yumMult < 0 ) {
+                    yumMult = 0;
+                    }
+
+                // yum mult part of weight
+                totalWeight += 0.5 * yumMult / (double) maxYumMult;
+
+                if( totalWeight >= choice ) {
                     parent = p;
                     break;
                     }                
@@ -3030,7 +4849,23 @@ void processLoggedInPlayer( Socket *inSock,
                 
                 int childRace = parentObject->race;
                 
-                if( randSource.getRandomDouble() > childSameRaceLikelihood ) {
+                char forceDifferentRace = false;
+
+                if( getRaceSize( parentObject->race ) < 4 ) {
+                    // no room in race for diverse family members
+                    
+                    // pick a different race for child to ensure village 
+                    // diversity
+                    // (otherwise, almost everyone is going to look the same)
+                    forceDifferentRace = true;
+                    }
+                
+                // everyone has a small chance of having a neighboring-race
+                // baby, even if not forced by parent's small race size
+                if( forceDifferentRace ||
+                    randSource.getRandomDouble() > 
+                    childSameRaceLikelihood ) {
+                    
                     // different race than parent
                     
                     int offset = 1;
@@ -3092,11 +4927,83 @@ void processLoggedInPlayer( Socket *inSock,
             newObject.xd = cPos.x;
             newObject.yd = cPos.y;
             }
-        }                    
-    else {
+        
+        if( newObject.xs > maxPlacementX ) {
+            maxPlacementX = newObject.xs;
+            }
+        }
+    else if( inTutorialNumber > 0 ) {
+        
+        int startX = maxPlacementX + tutorialOffsetX;
+        int startY = tutorialCount * 25;
+
+        newObject.xs = startX;
+        newObject.ys = startY;
+        
+        newObject.xd = startX;
+        newObject.yd = startY;
+
+        char *mapFileName = autoSprintf( "tutorial%d.txt", inTutorialNumber );
+        
+        placed = loadTutorialStart( &( newObject.tutorialLoad ),
+                                    mapFileName, startX, startY );
+        
+        delete [] mapFileName;
+
+        tutorialCount ++;
+
+        int maxPlayers = 
+            SettingsManager::getIntSetting( "maxPlayers", 200 );
+
+        if( tutorialCount > maxPlayers ) {
+            // wrap back to 0 so we don't keep getting farther
+            // and farther away on map if server runs for a long time.
+
+            // The earlier-placed tutorials are over by now, because
+            // we can't have more than maxPlayers tutorials running at once
+            
+            tutorialCount = 0;
+            }
+        }
+    
+    
+    if( !placed ) {
+        // tutorial didn't happen if not placed
+        newObject.isTutorial = false;
+        
+        char allowEveRespawn = true;
+        
+        if( numOfAge >= 4 ) {
+            // there are at least 4 fertile females on the server
+            // why is this player spawning as Eve?
+            // they must be on lineage ban everywhere
+            // (and they are NOT a solo player on an empty server)
+            // don't allow them to spawn back at their last old-age Eve death
+            // location.
+            allowEveRespawn = false;
+            }
+
         // else starts at civ outskirts (lone Eve)
         int startX, startY;
-        getEvePosition( newObject.email, &startX, &startY );
+        getEvePosition( newObject.email, &startX, &startY, allowEveRespawn );
+
+        if( inCurseStatus.curseLevel > 0 ) {
+            // keep cursed players away
+
+            // 20K away in X and 20K away in Y, pushing out away from 0
+            // in both directions
+
+            if( startX > 0 )
+                startX += 20000;
+            else
+                startX -= 20000;
+            
+            if( startY > 0 )
+                startY += 20000;
+            else
+                startY -= 20000;
+            }
+        
 
         if( SettingsManager::getIntSetting( "forceEveLocation", 0 ) ) {
 
@@ -3111,22 +5018,50 @@ void processLoggedInPlayer( Socket *inSock,
         newObject.ys = startY;
         
         newObject.xd = startX;
-        newObject.yd = startY;    
+        newObject.yd = startY;
+
+        if( newObject.xs > maxPlacementX ) {
+            maxPlacementX = newObject.xs;
+            }
         }
     
 
-    int forceID = SettingsManager::getIntSetting( "forceEveObject", 0 );
-    
-    if( forceID > 0 ) {
-        newObject.displayID = forceID;
+    if( inForceDisplayID != -1 ) {
+        newObject.displayID = inForceDisplayID;
+        }
+
+    if( inForcePlayerPos != NULL ) {
+        int startX = inForcePlayerPos->x;
+        int startY = inForcePlayerPos->y;
+        
+        newObject.xs = startX;
+        newObject.ys = startY;
+        
+        newObject.xd = startX;
+        newObject.yd = startY;
+
+        if( newObject.xs > maxPlacementX ) {
+            maxPlacementX = newObject.xs;
+            }
         }
     
+
     
-    float forceAge = SettingsManager::getFloatSetting( "forceEveAge", 0.0 );
+    if( parent == NULL ) {
+        // Eve
+        int forceID = SettingsManager::getIntSetting( "forceEveObject", 0 );
     
-    if( forceAge > 0 ) {
-        newObject.lifeStartTimeSeconds = 
-            Time::getCurrentTime() - forceAge * ( 1.0 / getAgeRate() );
+        if( forceID > 0 ) {
+            newObject.displayID = forceID;
+            }
+        
+        
+        float forceAge = SettingsManager::getFloatSetting( "forceEveAge", 0.0 );
+        
+        if( forceAge > 0 ) {
+            newObject.lifeStartTimeSeconds = 
+                Time::getCurrentTime() - forceAge * ( 1.0 / getAgeRate() );
+            }
         }
     
 
@@ -3160,6 +5095,21 @@ void processLoggedInPlayer( Socket *inSock,
     newObject.lineage = new SimpleVector<int>();
     
     newObject.name = NULL;
+    newObject.nameHasSuffix = false;
+    newObject.lastSay = NULL;
+    newObject.curseStatus = inCurseStatus;
+    
+
+    if( newObject.curseStatus.curseLevel == 0 &&
+        hasCurseToken( inEmail ) ) {
+        newObject.curseTokenCount = 1;
+        }
+    else {
+        newObject.curseTokenCount = 0;
+        }
+
+    newObject.curseTokenUpdate = true;
+
     
     newObject.pathLength = 0;
     newObject.pathToDest = NULL;
@@ -3177,6 +5127,10 @@ void processLoggedInPlayer( Socket *inSock,
     newObject.heldOriginValid = 0;
     newObject.heldOriginX = 0;
     newObject.heldOriginY = 0;
+
+    newObject.heldGraveOriginX = 0;
+    newObject.heldGraveOriginY = 0;
+
     newObject.heldTransitionSourceID = -1;
     newObject.numContained = 0;
     newObject.containedIDs = NULL;
@@ -3188,14 +5142,30 @@ void processLoggedInPlayer( Socket *inSock,
     newObject.murderSourceID = 0;
     newObject.holdingWound = false;
     
+    newObject.murderPerpID = 0;
+    newObject.murderPerpEmail = NULL;
+    
+    newObject.deathSourceID = 0;
+    
+    newObject.everKilledAnyone = false;
+    newObject.suicide = false;
+    
+
     newObject.sock = inSock;
     newObject.sockBuffer = inSockBuffer;
+    
+    newObject.gotPartOfThisFrame = false;
+    
     newObject.isNew = true;
     newObject.firstMessageSent = false;
+    newObject.inFlight = false;
     
     newObject.dying = false;
     newObject.dyingETA = 0;
     
+    newObject.emotFrozen = false;
+
+    newObject.connected = true;
     newObject.error = false;
     newObject.errorCauseString = "";
     
@@ -3207,16 +5177,25 @@ void processLoggedInPlayer( Socket *inSock,
     newObject.newMove = false;
     
     newObject.posForced = false;
+    newObject.waitingForForceResponse = false;
+    
+    // first move that player sends will be 2
+    newObject.lastMoveSequenceNumber = 1;
 
     newObject.needsUpdate = false;
     newObject.updateSent = false;
+    newObject.updateGlobal = false;
     
     newObject.babyBirthTimes = new SimpleVector<timeSec_t>();
     newObject.babyIDs = new SimpleVector<int>();
     
     newObject.birthCoolDown = 0;
-                
-                
+    
+    newObject.monumentPosSet = false;
+    newObject.monumentPosSent = true;
+    
+    newObject.holdingFlightObject = false;
+
                 
     for( int i=0; i<HEAT_MAP_D * HEAT_MAP_D; i++ ) {
         newObject.heatMap[i] = 0;
@@ -3231,10 +5210,21 @@ void processLoggedInPlayer( Socket *inSock,
         newObject.parentID = parent->id;
         parentEmail = parent->email;
 
+        newObject.lineageEveID = parent->lineageEveID;
+
         newObject.parentChainLength = parent->parentChainLength + 1;
 
         // mother
         newObject.lineage->push_back( newObject.parentID );
+
+        // inherit last heard monument, if any, from parent
+        newObject.monumentPosSet = parent->monumentPosSet;
+        newObject.lastMonumentPos = parent->lastMonumentPos;
+        newObject.lastMonumentID = parent->lastMonumentID;
+        if( newObject.monumentPosSet ) {
+            newObject.monumentPosSent = false;
+            }
+        
         
         for( int i=0; 
              i < parent->lineage->size() && 
@@ -3245,13 +5235,36 @@ void processLoggedInPlayer( Socket *inSock,
                 parent->lineage->getElementDirect( i ) );
             }
         }
+
+    newObject.birthPos.x = newObject.xd;
+    newObject.birthPos.y = newObject.yd;
+    
+    newObject.heldOriginX = newObject.xd;
+    newObject.heldOriginY = newObject.yd;
+    
+    newObject.actionTarget = newObject.birthPos;
+    
+
     
     // parent pointer possibly no longer valid after push_back, which
     // can resize the vector
     parent = NULL;
-    players.push_back( newObject );            
 
 
+    if( newObject.isTutorial ) {
+        AppLog::infoF( "New player %s pending tutorial load (tutorial=%d)",
+                       newObject.email,
+                       inTutorialNumber );
+
+        // holding bay for loading tutorial maps incrementally
+        tutorialLoadingPlayers.push_back( newObject );
+        }
+    else {
+        players.push_back( newObject );            
+        }
+    
+
+    if( ! newObject.isTutorial )        
     logBirth( newObject.id,
               newObject.email,
               newObject.parentID,
@@ -3262,8 +5275,194 @@ void processLoggedInPlayer( Socket *inSock,
               players.size(),
               newObject.parentChainLength );
     
-    AppLog::infoF( "New player %s connected as player %d",
-                   newObject.email, newObject.id );
+    AppLog::infoF( "New player %s connected as player %d (tutorial=%d) (%d,%d)"
+                   " (maxPlacementX=%d)",
+                   newObject.email, newObject.id,
+                   inTutorialNumber, newObject.xs, newObject.ys,
+                   maxPlacementX );
+    
+    return newObject.id;
+    }
+
+
+
+
+static void processWaitingTwinConnection( FreshConnection inConnection ) {
+    AppLog::infoF( "Player %s waiting for twin party of %d", 
+                   inConnection.email,
+                   inConnection.twinCount );
+    waitingForTwinConnections.push_back( inConnection );
+    
+    CurseStatus anyTwinCurseLevel = inConnection.curseStatus;
+    
+
+    // count how many match twin code from inConnection
+    // is this the last one to join the party?
+    SimpleVector<FreshConnection*> twinConnections;
+    
+
+    for( int i=0; i<waitingForTwinConnections.size(); i++ ) {
+        FreshConnection *nextConnection = 
+            waitingForTwinConnections.getElement( i );
+        
+        if( nextConnection->error ) {
+            continue;
+            }
+        
+        if( nextConnection->twinCode != NULL
+            &&
+            strcmp( inConnection.twinCode, nextConnection->twinCode ) == 0 
+            &&
+            inConnection.twinCount == nextConnection->twinCount ) {
+            
+            if( strcmp( inConnection.email, nextConnection->email ) == 0 ) {
+                // don't count this connection itself
+                continue;
+                }
+
+            if( nextConnection->curseStatus.curseLevel > 
+                anyTwinCurseLevel.curseLevel ) {
+                anyTwinCurseLevel = nextConnection->curseStatus;
+                }
+            
+            twinConnections.push_back( nextConnection );
+            }
+        }
+
+    
+    if( twinConnections.size() + 1 >= inConnection.twinCount ) {
+        // everyone connected and ready in twin party
+
+        AppLog::infoF( "Found %d other people waiting for twin party of %s, "
+                       "ready", 
+                       twinConnections.size(), inConnection.email );
+        
+        char *emailCopy = stringDuplicate( inConnection.email );
+        
+        int newID = processLoggedInPlayer( inConnection.sock,
+                                           inConnection.sockBuffer,
+                                           inConnection.email,
+                                           inConnection.tutorialNumber,
+                                           anyTwinCurseLevel );
+
+        if( newID == -1 ) {
+            AppLog::infoF( "%s reconnected to existing life, not triggering "
+                           "fellow twins to spawn now.",
+                           emailCopy );
+
+            // take them out of waiting list too
+            for( int i=0; i<waitingForTwinConnections.size(); i++ ) {
+                if( waitingForTwinConnections.getElement( i )->sock ==
+                    inConnection.sock ) {
+                    // found
+                    
+                    waitingForTwinConnections.deleteElement( i );
+                    break;
+                    }
+                }
+
+            delete [] emailCopy;
+
+            if( inConnection.twinCode != NULL ) {
+                delete [] inConnection.twinCode;
+                inConnection.twinCode = NULL;
+                }
+            return;
+            }
+
+        delete [] emailCopy;
+        
+        
+        LiveObject *newPlayer = NULL;
+
+        if( inConnection.tutorialNumber == 0 ) {
+            newPlayer = getLiveObject( newID );
+            }
+        else {
+            newPlayer = tutorialLoadingPlayers.getElement(
+                tutorialLoadingPlayers.size() - 1 );
+            }
+
+
+        int parent = newPlayer->parentID;
+        int displayID = newPlayer->displayID;
+        GridPos playerPos = { newPlayer->xd, newPlayer->yd };
+        
+        GridPos *forcedEvePos = NULL;
+        
+        if( parent == -1 ) {
+            // first twin placed was Eve
+            // others are identical Eves
+            forcedEvePos = &playerPos;
+            // trigger forced Eve placement
+            parent = -2;
+            }
+
+        // save these out here, because newPlayer points into 
+        // tutorialLoadingPlayers, which may expand during this loop,
+        // invalidating that pointer
+        char isTutorial = newPlayer->isTutorial;
+        TutorialLoadProgress sharedTutorialLoad = newPlayer->tutorialLoad;
+
+        for( int i=0; i<twinConnections.size(); i++ ) {
+            FreshConnection *nextConnection = 
+                twinConnections.getElementDirect( i );
+            
+            processLoggedInPlayer( nextConnection->sock,
+                                   nextConnection->sockBuffer,
+                                   nextConnection->email,
+                                   // ignore tutorial number of all but
+                                   // first player
+                                   0,
+                                   anyTwinCurseLevel,
+                                   parent,
+                                   displayID,
+                                   forcedEvePos );
+            
+            // just added is always last object in list
+            LiveObject newTwinPlayer = 
+                players.getElementDirect( players.size() - 1 );
+
+            if( isTutorial ) {
+                // force this one to wait for same tutorial map load
+                newTwinPlayer.tutorialLoad = sharedTutorialLoad;
+
+                // flag them as a tutorial player too, so they can't have
+                // babies in the tutorial, and they won't be remembered
+                // as a long-lineage position at shutdown
+                newTwinPlayer.isTutorial = true;
+
+                players.deleteElement( players.size() - 1 );
+                
+                tutorialLoadingPlayers.push_back( newTwinPlayer );
+                }
+            }
+        
+
+        char *twinCode = stringDuplicate( inConnection.twinCode );
+        
+        for( int i=0; i<waitingForTwinConnections.size(); i++ ) {
+            FreshConnection *nextConnection = 
+                waitingForTwinConnections.getElement( i );
+            
+            if( nextConnection->error ) {
+                continue;
+                }
+            
+            if( nextConnection->twinCode != NULL 
+                &&
+                nextConnection->twinCount == inConnection.twinCount
+                &&
+                strcmp( nextConnection->twinCode, twinCode ) == 0 ) {
+                
+                delete [] nextConnection->twinCode;
+                waitingForTwinConnections.deleteElement( i );
+                i--;
+                }
+            }
+        
+        delete [] twinCode;
+        }
     }
 
 
@@ -3374,6 +5573,38 @@ static char addHeldToContainer( LiveObject *inPlayer,
         setResponsiblePlayer( 
             inPlayer->id );
         
+
+        // adding something to a container acts like a drop
+        // but some non-permanent held objects are supposed to go through 
+        // a transition when they drop (example:  held wild piglet is
+        // non-permanent, so it can be containable, but it supposed to
+        // switch to a moving wild piglet when dropped.... we should
+        // switch to this other wild piglet when putting it into a container
+        // too)
+
+        // "set-down" type bare ground
+        // trans exists for what we're 
+        // holding?
+        TransRecord *r = getPTrans( inPlayer->holdingID, -1 );
+
+        if( r != NULL && r->newActor == 0 && r->newTarget > 0 ) {
+                                            
+            // only applies if the 
+            // bare-ground
+            // trans leaves nothing in
+            // our hand
+            
+            // first, change what they
+            // are holding to this 
+            // newTarget
+            
+
+            handleHoldingChange( 
+                inPlayer,
+                r->newTarget );
+            }
+
+
         int idToAdd = inPlayer->holdingID;
 
 
@@ -3459,7 +5690,7 @@ static char addHeldToContainer( LiveObject *inPlayer,
                                                        numInNow );
                     
                         if( bottomNum != topNum ) {
-                            same = true;
+                            same = false;
                             }
                         else {
                             for( int b=0; b<bottomNum; b++ ) {
@@ -3473,7 +5704,6 @@ static char addHeldToContainer( LiveObject *inPlayer,
                                     break;
                                     }
                                 }
-                            same = true;
                             }
                         }
                     }
@@ -3555,6 +5785,16 @@ char removeFromContainerToHold( LiveObject *inPlayer,
                 subContain = true;
                 }
 
+            
+            if( toRemoveID == 0 ) {
+                // this should never happen, except due to map corruption
+                
+                // clear container, to be safe
+                clearAllContained( inContX, inContY );
+                return false;
+                }
+
+
             if( inPlayer->holdingID == 0 && 
                 numIn > 0 &&
                 // old enough to handle it
@@ -3597,7 +5837,25 @@ char removeFromContainerToHold( LiveObject *inPlayer,
                     removeContained( 
                         inContX, inContY, inSlotNumber,
                         &( inPlayer->holdingEtaDecay ) );
-                        
+                
+
+                // does bare-hand action apply to this newly-held object
+                // one that results in something new in the hand and
+                // nothing on the ground?
+
+                // if so, it is a pick-up action, and it should apply here
+
+                TransRecord *pickupTrans = getPTrans( 0, inPlayer->holdingID );
+                
+                if( pickupTrans != NULL && pickupTrans->newActor > 0 &&
+                    pickupTrans->newTarget == 0 ) {
+                    
+                    handleHoldingChange( inPlayer, pickupTrans->newActor );
+                    }
+                else {
+                    holdingSomethingNew( inPlayer );
+                    }
+                
                 setResponsiblePlayer( -1 );
 
                 if( inPlayer->holdingID < 0 ) {
@@ -3695,6 +5953,113 @@ static char addHeldToClothingContainer( LiveObject *inPlayer,
 
 
 
+
+static void pickupToHold( LiveObject *inPlayer, int inX, int inY, 
+                          int inTargetID ) {
+    inPlayer->holdingEtaDecay = 
+        getEtaDecay( inX, inY );
+    
+    FullMapContained f =
+        getFullMapContained( inX, inY );
+    
+    setContained( inPlayer, f );
+    
+    clearAllContained( inX, inY );
+    
+    setResponsiblePlayer( - inPlayer->id );
+    setMapObject( inX, inY, 0 );
+    setResponsiblePlayer( -1 );
+    
+    inPlayer->holdingID = inTargetID;
+    holdingSomethingNew( inPlayer );
+    
+    inPlayer->heldGraveOriginX = inX;
+    inPlayer->heldGraveOriginY = inY;
+    
+    inPlayer->heldOriginValid = 1;
+    inPlayer->heldOriginX = inX;
+    inPlayer->heldOriginY = inY;
+    inPlayer->heldTransitionSourceID = -1;
+    }
+
+
+static void removeFromClothingContainerToHold( LiveObject *inPlayer,
+                                               int inC,
+                                               int inI = -1 ) {    
+    
+    ObjectRecord *cObj = 
+        clothingByIndex( inPlayer->clothing, 
+                         inC );
+                                
+    float stretch = 1.0f;
+    
+    if( cObj != NULL ) {
+        stretch = cObj->slotTimeStretch;
+        }
+    
+    int oldNumContained = 
+        inPlayer->clothingContained[inC].size();
+
+    int slotToRemove = inI;
+                                
+    if( slotToRemove < 0 ) {
+        slotToRemove = oldNumContained - 1;
+        }
+                                
+    int toRemoveID = -1;
+                                
+    if( oldNumContained > 0 &&
+        oldNumContained > slotToRemove &&
+        slotToRemove >= 0 ) {
+                                    
+        toRemoveID = 
+            inPlayer->clothingContained[inC].
+            getElementDirect( slotToRemove );
+        }
+
+    if( oldNumContained > 0 &&
+        oldNumContained > slotToRemove &&
+        slotToRemove >= 0 &&
+        // old enough to handle it
+        getObject( toRemoveID )->minPickupAge <= 
+        computeAge( inPlayer ) ) {
+                                    
+
+        inPlayer->holdingID = 
+            inPlayer->clothingContained[inC].
+            getElementDirect( slotToRemove );
+        holdingSomethingNew( inPlayer );
+
+        inPlayer->holdingEtaDecay = 
+            inPlayer->
+            clothingContainedEtaDecays[inC].
+            getElementDirect( slotToRemove );
+                                    
+        timeSec_t curTime = Time::timeSec();
+
+        if( inPlayer->holdingEtaDecay != 0 ) {
+                                        
+            timeSec_t offset = 
+                inPlayer->holdingEtaDecay
+                - curTime;
+            offset = offset * stretch;
+            inPlayer->holdingEtaDecay =
+                curTime + offset;
+            }
+
+        inPlayer->clothingContained[inC].
+            deleteElement( slotToRemove );
+        inPlayer->clothingContainedEtaDecays[inC].
+            deleteElement( slotToRemove );
+
+        inPlayer->heldOriginValid = 0;
+        inPlayer->heldOriginX = 0;
+        inPlayer->heldOriginY = 0;
+        inPlayer->heldTransitionSourceID = -1;
+        }
+    }
+
+
 // change held as the result of a transition
 static void handleHoldingChange( LiveObject *inPlayer, int inNewHeldID ) {
     
@@ -3704,19 +6069,112 @@ static void handleHoldingChange( LiveObject *inPlayer, int inNewHeldID ) {
     
     int oldContained = 
         nextPlayer->numContained;
+    
+    
+    nextPlayer->heldOriginValid = 0;
+    nextPlayer->heldOriginX = 0;
+    nextPlayer->heldOriginY = 0;
+    
+    // can newly changed container hold
+    // less than what it could contain
+    // before?
+    
+    int newHeldSlots = getNumContainerSlots( inNewHeldID );
+    
+    if( newHeldSlots < oldContained ) {
+        // new container can hold less
+        // truncate
+                            
+        GridPos dropPos = 
+            getPlayerPos( inPlayer );
+                            
+        // offset to counter-act offsets built into
+        // drop code
+        dropPos.x += 1;
+        dropPos.y += 1;
+        
+        char found = false;
+        GridPos spot;
+        
+        if( getMapObject( dropPos.x, dropPos.y ) == 0 ) {
+            spot = dropPos;
+            found = true;
+            }
+        else {
+            found = findDropSpot( 
+                dropPos.x, dropPos.y,
+                dropPos.x, dropPos.y,
+                &spot );
+            }
+        
+        
+        if( found ) {
+            
+            // throw it on map temporarily
+            handleDrop( 
+                spot.x, spot.y, 
+                inPlayer,
+                // only temporary, don't worry about blocking players
+                // with this drop
+                NULL );
+                                
+
+            // responsible player for stuff thrown on map by shrink
+            setResponsiblePlayer( inPlayer->id );
+
+            // shrink contianer on map
+            shrinkContainer( spot.x, spot.y, 
+                             newHeldSlots );
+            
+            setResponsiblePlayer( -1 );
+            
+
+            // pick it back up
+            nextPlayer->holdingEtaDecay = 
+                getEtaDecay( spot.x, spot.y );
+                                    
+            FullMapContained f =
+                getFullMapContained( spot.x, spot.y );
+
+            setContained( inPlayer, f );
+            
+            clearAllContained( spot.x, spot.y );
+            setMapObject( spot.x, spot.y, 0 );
+            }
+        else {
+            // no spot to throw it
+            // cannot leverage map's container-shrinking
+            // just truncate held container directly
+            
+            // truncated contained items will be lost
+            inPlayer->numContained = newHeldSlots;
+            }
+        }
 
     nextPlayer->holdingID = inNewHeldID;
+    holdingSomethingNew( inPlayer, oldHolding );
+
+    if( newHeldSlots > 0 && 
+        oldHolding != 0 ) {
+                                        
+        restretchDecays( 
+            newHeldSlots,
+            nextPlayer->containedEtaDecays,
+            oldHolding,
+            nextPlayer->holdingID );
+        }
     
-    if( oldHolding != nextPlayer->holdingID ) {
-        
+    
+    if( oldHolding != inNewHeldID ) {
+            
         char kept = false;
 
         // keep old decay timeer going...
         // if they both decay to the same thing in the same time
-        if( oldHolding > 0 && nextPlayer->holdingID > 0 ) {
+        if( oldHolding > 0 && inNewHeldID > 0 ) {
             
-            TransRecord *oldDecayT = getTrans( -1, oldHolding );
-            TransRecord *newDecayT = getTrans( -1, inPlayer->holdingID );
+            TransRecord *oldDecayT = getMetaTrans( -1, oldHolding );
+            TransRecord *newDecayT = getMetaTrans( -1, inNewHeldID );
             
             if( oldDecayT != NULL && newDecayT != NULL ) {
                 if( oldDecayT->autoDecaySeconds == newDecayT->autoDecaySeconds
@@ -3731,34 +6189,7 @@ static void handleHoldingChange( LiveObject *inPlayer, int inNewHeldID ) {
             setFreshEtaDecayForHeld( nextPlayer );
             }
         }
-    
-    nextPlayer->heldOriginValid = 0;
-    nextPlayer->heldOriginX = 0;
-    nextPlayer->heldOriginY = 0;
-    
-    // can newly changed container hold
-    // less than what it could contain
-    // before?
-    
-    int newHeldSlots = getNumContainerSlots( 
-        nextPlayer->holdingID );
-    
-    if( newHeldSlots < oldContained ) {
-        // truncate
-        nextPlayer->numContained
-            = newHeldSlots;
-        }
-    
-    if( newHeldSlots > 0 && 
-        oldHolding != 0 ) {
-                                        
-        restretchDecays( 
-            newHeldSlots,
-            nextPlayer->containedEtaDecays,
-            oldHolding,
-            nextPlayer->holdingID );
-        }
-                                    
+
     }
 
 
@@ -3800,6 +6231,11 @@ static int maxUncompressedSize = 256;
 
 static void sendMessageToPlayer( LiveObject *inPlayer, 
                                  char *inMessage, int inLength ) {
+    if( ! inPlayer->connected ) {
+        // stop sending messages to disconnected players
+        return;
+        }
+    
     
     unsigned char *message = (unsigned char*)inMessage;
     int len = inLength;
@@ -3817,12 +6253,11 @@ static void sendMessageToPlayer( LiveObject *inPlayer,
                               false, false );
         
     if( numSent != len ) {
-        setDeathReason( inPlayer, "disconnected" );
-        
-        inPlayer->error = true;
-        inPlayer->errorCauseString = "Socket write failed";
+        setPlayerDisconnected( inPlayer, "Socket write failed" );
         }
 
+    inPlayer->gotPartOfThisFrame = true;
+    
     if( deleteMessage ) {
         delete [] message;
         }
@@ -3830,8 +6265,8 @@ static void sendMessageToPlayer( LiveObject *inPlayer,
     
 
 
-void readNameGivingPhrases( const char *inSettingsName, 
-                            SimpleVector<char*> *inList ) {
+void readPhrases( const char *inSettingsName, 
+                  SimpleVector<char*> *inList ) {
     char *cont = SettingsManager::getSettingContents( inSettingsName, "" );
     
     if( strcmp( cont, "" ) == 0 ) {
@@ -3856,17 +6291,26 @@ void readNameGivingPhrases( const char *inSettingsName,
 
 // returns pointer to name in string
 char *isNamingSay( char *inSaidString, SimpleVector<char*> *inPhraseList ) {
+    char *saidString = inSaidString;
+    
+    if( saidString[0] == ':' ) {
+        // first : indicates reading a written phrase.
+        // reading written phrase aloud does not have usual effects
+        // (block curse exploit)
+        return NULL;
+        }
+    
     for( int i=0; i<inPhraseList->size(); i++ ) {
         char *testString = inPhraseList->getElementDirect( i );
         
-        if( strstr( inSaidString, testString ) == inSaidString ) {
+        if( strstr( inSaidString, testString ) == saidString ) {
             // hit
             int phraseLen = strlen( testString );
             // skip spaces after
-            while( inSaidString[ phraseLen ] == ' ' ) {
+            while( saidString[ phraseLen ] == ' ' ) {
                 phraseLen++;
                 }
-            return &( inSaidString[ phraseLen ] );
+            return &( saidString[ phraseLen ] );
             }
         }
     return NULL;
@@ -3882,7 +6326,9 @@ char *isFamilyNamingSay( char *inSaidString ) {
     return isNamingSay( inSaidString, &familyNameGivingPhrases );
     }
 
-
+char *isCurseNamingSay( char *inSaidString ) {
+    return isNamingSay( inSaidString, &cursingPhrases );
+    }
 
 
 int readIntFromFile( const char *inFileName, int inDefaultValue ) {
@@ -3912,17 +6358,25 @@ void apocalypseStep() {
         if( apocalypseRequest == NULL &&
             curTime - lastRemoteApocalypseCheckTime > 
             remoteApocalypseCheckInterval ) {
-            printf( "Checking for remote apocalypse\n" );
-            
+
             lastRemoteApocalypseCheckTime = curTime;
+
+            // don't actually send request to reflector if apocalypse
+            // not possible locally
+            // or if broadcast mode disabled
+            if( SettingsManager::getIntSetting( "apocalypsePossible", 0 ) &&
+                SettingsManager::getIntSetting( "apocalypseBroadcast", 0 ) ) {
+
+                printf( "Checking for remote apocalypse\n" );
             
-            char *url = autoSprintf( "%s?action=check_apocalypse", 
-                                     reflectorURL );
+                char *url = autoSprintf( "%s?action=check_apocalypse", 
+                                         reflectorURL );
         
-            apocalypseRequest =
-                new WebRequest( "GET", url, NULL );
+                apocalypseRequest =
+                    new WebRequest( "GET", url, NULL );
             
-            delete [] url;
+                delete [] url;
+                }
             }
         else if( apocalypseRequest != NULL ) {
             int result = apocalypseRequest->step();
@@ -3982,10 +6436,17 @@ void apocalypseStep() {
                 apocalypseTriggered = false;
                 return;
                 }
+            
+            AppLog::info( "Apocalypse triggerered, starting it" );
 
-            if( !apocalypseRemote && 
+
+            // only broadcast to reflector if apocalypseBroadcast set
+            if( !apocalypseRemote &&
+                SettingsManager::getIntSetting( "apocalypseBroadcast", 0 ) &&
                 apocalypseRequest == NULL && reflectorURL != NULL ) {
                 
+                AppLog::info( "Apocalypse broadcast set, telling reflector" );
+
                 
                 char *reflectorSharedSecret = 
                     SettingsManager::
@@ -4060,7 +6521,7 @@ void apocalypseStep() {
             
             for( int i=0; i<players.size(); i++ ) {
                 LiveObject *nextPlayer = players.getElement( i );
-                if( !nextPlayer->error ) {
+                if( !nextPlayer->error && nextPlayer->connected ) {
                     
                     int numSent = 
                         nextPlayer->sock->send( 
@@ -4068,18 +6529,18 @@ void apocalypseStep() {
                             messageLength,
                             false, false );
                     
+                    nextPlayer->gotPartOfThisFrame = true;
+                    
                     if( numSent != messageLength ) {
-                        setDeathReason( nextPlayer, "disconnected" );
-                        
-                        nextPlayer->error = true;
-                        nextPlayer->errorCauseString =
-                            "Socket write failed";
+                        setPlayerDisconnected( nextPlayer, 
+                                               "Socket write failed" );
                         }
                     }
                 }
             
             apocalypseStartTime = Time::getCurrentTime();
             apocalypseStarted = true;
+            postApocalypseStarted = false;
             }
 
         if( apocalypseRequest != NULL ) {
@@ -4117,31 +6578,90 @@ void apocalypseStep() {
         if( apocalypseRequest == NULL &&
             Time::getCurrentTime() - apocalypseStartTime >= 7 ) {
             
-            for( int i=0; i<players.size(); i++ ) {
-                LiveObject *nextPlayer = players.getElement( i );
+            if( ! postApocalypseStarted  ) {
+                AppLog::infoF( "Enough warning time, %d players still alive",
+                               players.size() );
                 
-                if( ! nextPlayer->error ) {
-                    nextPlayer->error = true;
-                    setDeathReason( nextPlayer, "apocalypse" );
-                    }
-                }
-
-            if( players.size() == 0 ) {
-                // apocalypse over
-
+                
+                double startTime = Time::getCurrentTime();
+                
                 // clear map
-                freeMap();
-                
+                freeMap( true );
+
+                AppLog::infoF( "Apocalypse freeMap took %f sec",
+                               Time::getCurrentTime() - startTime );
                 wipeMapFiles();
+
+                AppLog::infoF( "Apocalypse wipeMapFiles took %f sec",
+                               Time::getCurrentTime() - startTime );
                 
                 initMap();
-
+                
+                AppLog::infoF( "Apocalypse initMap took %f sec",
+                               Time::getCurrentTime() - startTime );
+                
 
                 lastRemoteApocalypseCheckTime = curTime;
-                apocalypseStarted = false;
-                apocalypseTriggered = false;
-                apocalypseRemote = false;
+                
+                for( int i=0; i<players.size(); i++ ) {
+                    LiveObject *nextPlayer = players.getElement( i );
+                    backToBasics( nextPlayer );
+                    }
+                
+                // send everyone update about everyone
+                for( int i=0; i<players.size(); i++ ) {
+                    LiveObject *nextPlayer = players.getElement( i );
+                    nextPlayer->firstMessageSent = false;
+                    nextPlayer->firstMapSent = false;
+                    nextPlayer->inFlight = false;
+                    }
+
+                postApocalypseStarted = true;
                 }
+            else {
+                // make sure all players have gotten map and update
+                char allMapAndUpdate = true;
+                
+                for( int i=0; i<players.size(); i++ ) {
+                    LiveObject *nextPlayer = players.getElement( i );
+                    if( ! nextPlayer->firstMapSent ) {
+                        allMapAndUpdate = false;
+                        break;
+                        }
+                    }
+                
+                if( allMapAndUpdate ) {
+                    
+                    // send all players the AD message
+                    const char *message = "AD\n#";
+                    int messageLength = strlen( message );
+            
+                    for( int i=0; i<players.size(); i++ ) {
+                        LiveObject *nextPlayer = players.getElement( i );
+                        if( !nextPlayer->error && nextPlayer->connected ) {
+                    
+                            int numSent = 
+                                nextPlayer->sock->send( 
+                                    (unsigned char*)message, 
+                                    messageLength,
+                                    false, false );
+                            
+                            nextPlayer->gotPartOfThisFrame = true;
+                    
+                            if( numSent != messageLength ) {
+                                setPlayerDisconnected( nextPlayer, 
+                                                       "Socket write failed" );
+                                }
+                            }
+                        }
+
+                    // totally done
+                    apocalypseStarted = false;
+                    apocalypseTriggered = false;
+                    apocalypseRemote = false;
+                    postApocalypseStarted = false;
+                    }
+                }    
             }
         }
     }
@@ -4151,33 +6671,44 @@ void apocalypseStep() {
 
 void monumentStep() {
     if( monumentCallPending ) {
+        
         // send to all players
-        char *message = autoSprintf( "MN\n%d %d %d\n#", 
-                                     monumentCallX, monumentCallY,
-                                     monumentCallID );
-        int messageLength = strlen( message );
-            
         for( int i=0; i<players.size(); i++ ) {
             LiveObject *nextPlayer = players.getElement( i );
-            if( !nextPlayer->error ) {
+            // remember it to tell babies about it
+            nextPlayer->monumentPosSet = true;
+            nextPlayer->lastMonumentPos.x = monumentCallX;
+            nextPlayer->lastMonumentPos.y = monumentCallY;
+            nextPlayer->lastMonumentID = monumentCallID;
+            nextPlayer->monumentPosSent = true;
+            
+            if( !nextPlayer->error && nextPlayer->connected ) {
                 
+                char *message = autoSprintf( "MN\n%d %d %d\n#", 
+                                             monumentCallX -
+                                             nextPlayer->birthPos.x, 
+                                             monumentCallY -
+                                             nextPlayer->birthPos.y,
+                                             hideIDForClient( 
+                                                 monumentCallID ) );
+                int messageLength = strlen( message );
+
+
                 int numSent = 
                     nextPlayer->sock->send( 
                         (unsigned char*)message, 
                         messageLength,
                         false, false );
-                    
+                
+                nextPlayer->gotPartOfThisFrame = true;
+                
+                delete [] message;
+
                 if( numSent != messageLength ) {
-                    setDeathReason( nextPlayer, "disconnected" );
-                    
-                    nextPlayer->error = true;
-                    nextPlayer->errorCauseString =
-                        "Socket write failed";
+                    setPlayerDisconnected( nextPlayer, "Socket write failed" );
                     }
                 }
             }
-
-        delete [] message;
 
         monumentCallPending = false;
         }
@@ -4186,14 +6717,210 @@ void monumentStep() {
 
 
 
+// inPlayerName may be destroyed inside this function
+// returns a uniquified name, sometimes newly allocated.
+// return value destroyed by caller
+char *getUniqueCursableName( char *inPlayerName, char *outSuffixAdded ) {
+    
+    char dup = isNameDuplicateForCurses( inPlayerName );
+    
+    if( ! dup ) {
+        *outSuffixAdded = false;
+        return inPlayerName;
+        }
+    else {
+        *outSuffixAdded = true;
+
+        int targetPersonNumber = 1;
+        
+        char *fullName = stringDuplicate( inPlayerName );
+
+        while( dup ) {
+            // try next roman numeral
+            targetPersonNumber++;
+            
+            int personNumber = targetPersonNumber;            
+        
+            SimpleVector<char> romanNumeralList;
+        
+            while( personNumber >= 100 ) {
+                romanNumeralList.push_back( 'C' );
+                personNumber -= 100;
+                }
+            while( personNumber >= 50 ) {
+                romanNumeralList.push_back( 'L' );
+                personNumber -= 50;
+                }
+            while( personNumber >= 40 ) {
+                romanNumeralList.push_back( 'X' );
+                romanNumeralList.push_back( 'L' );
+                personNumber -= 40;
+                }
+            while( personNumber >= 10 ) {
+                romanNumeralList.push_back( 'X' );
+                personNumber -= 10;
+                }
+            while( personNumber >= 9 ) {
+                romanNumeralList.push_back( 'I' );
+                romanNumeralList.push_back( 'X' );
+                personNumber -= 9;
+                }
+            while( personNumber >= 5 ) {
+                romanNumeralList.push_back( 'V' );
+                personNumber -= 5;
+                }
+            while( personNumber >= 4 ) {
+                romanNumeralList.push_back( 'I' );
+                romanNumeralList.push_back( 'V' );
+                personNumber -= 4;
+                }
+            while( personNumber >= 1 ) {
+                romanNumeralList.push_back( 'I' );
+                personNumber -= 1;
+                }
+            
+            char *romanString = romanNumeralList.getElementString();
+
+            delete [] fullName;
+            
+            fullName = autoSprintf( "%s %s", inPlayerName, romanString );
+            delete [] romanString;
+            
+            dup = isNameDuplicateForCurses( fullName );
+            }
+        
+        delete [] inPlayerName;
+        
+        return fullName;
+        }
+    
+    }
+
+
+
+
+typedef struct ForcedEffects {
+        // -1 if no emot specified
+        int emotIndex;
+        int ttlSec;
+        
+        char foodModifierSet;
+        double foodCapModifier;
+        
+        char feverSet;
+        float fever;
+    } ForcedEffects;
+        
+
+
+ForcedEffects checkForForcedEffects( int inHeldObjectID ) {
+    ForcedEffects e = { -1, 0, false, 1.0, false, 0.0f };
+    
+    ObjectRecord *o = getObject( inHeldObjectID );
+    
+    if( o != NULL ) {
+        char *emotPos = strstr( o->description, "emot_" );
+        
+        if( emotPos != NULL ) {
+            sscanf( emotPos, "emot_%d_%d", 
+                    &( e.emotIndex ), &( e.ttlSec ) );
+            }
+
+        char *foodPos = strstr( o->description, "food_" );
+        
+        if( foodPos != NULL ) {
+            int numRead = sscanf( foodPos, "food_%lf", 
+                                  &( e.foodCapModifier ) );
+            if( numRead == 1 ) {
+                e.foodModifierSet = true;
+                }
+            }
+
+        char *feverPos = strstr( o->description, "fever_" );
+        
+        if( feverPos != NULL ) {
+            int numRead = sscanf( feverPos, "fever_%f", 
+                                  &( e.fever ) );
+            if( numRead == 1 ) {
+                e.feverSet = true;
+                }
+            }
+        }
+    
+    
+    return e;
+    }
+
+
+
+
+void setNoLongerDying( LiveObject *inPlayer, 
+                       SimpleVector<int> *inPlayerIndicesToSendHealingAbout ) {
+    inPlayer->dying = false;
+    inPlayer->murderSourceID = 0;
+    inPlayer->murderPerpID = 0;
+    if( inPlayer->murderPerpEmail != 
+        NULL ) {
+        delete [] 
+            inPlayer->murderPerpEmail;
+        inPlayer->murderPerpEmail =
+            NULL;
+        }
+    
+    inPlayer->deathSourceID = 0;
+    inPlayer->holdingWound = false;
+    inPlayer->customGraveID = -1;
+    
+    inPlayer->emotFrozen = false;
+    inPlayer->foodCapModifier = 1.0;
+    inPlayer->foodUpdate = true;
+
+    inPlayer->fever = 0;
+
+    if( inPlayer->deathReason 
+        != NULL ) {
+        delete [] inPlayer->deathReason;
+        inPlayer->deathReason = NULL;
+        }
+                                        
+    inPlayerIndicesToSendHealingAbout->
+        push_back( 
+            getLiveObjectIndex( 
+                inPlayer->id ) );
+    }
+
+
+
+typedef struct FlightDest {
+        int playerID;
+        GridPos destPos;
+    } FlightDest;
+        
+
+
+
 int main() {
+
+    if( checkReadOnly() ) {
+        printf( "File system read-only.  Server exiting.\n" );
+        return 1;
+        }
+    
+
+    memset( allowedSayCharMap, false, 256 );
+    
+    int numAllowed = strlen( allowedSayChars );
+    for( int i=0; i<numAllowed; i++ ) {
+        allowedSayCharMap[ (int)( allowedSayChars[i] ) ] = true;
+        }
+    
 
     nextID = 
         SettingsManager::getIntSetting( "nextPlayerID", 2 );
 
 
-    // make backup and delete old backup every two days
-    AppLog::setLog( new FileLog( "log.txt", 172800 ) );
+    // make backup and delete old backup every day
+    AppLog::setLog( new FileLog( "log.txt", 86400 ) );
 
     AppLog::setLoggingLevel( Log::DETAIL_LEVEL );
     AppLog::printAllMessages( true );
@@ -4280,8 +7007,10 @@ int main() {
         SettingsManager::getIntSetting( "familySpan", 2 );
     
     
-    readNameGivingPhrases( "babyNamingPhrases", &nameGivingPhrases );
-    readNameGivingPhrases( "familyNamingPhrases", &familyNameGivingPhrases );
+    readPhrases( "babyNamingPhrases", &nameGivingPhrases );
+    readPhrases( "familyNamingPhrases", &familyNameGivingPhrases );
+
+    readPhrases( "cursingPhrases", &cursingPhrases );
     
     eveName = 
         SettingsManager::getStringSetting( "eveName", "EVE" );
@@ -4299,11 +7028,17 @@ int main() {
 
     initNames();
 
+    initCurses();
+    
+
     initLifeLog();
-    initBackup();
+    //initBackup();
     
     initPlayerStats();
-
+    initLineageLog();
+    
+    initLineageLimit();
+    
 
     char rebuilding;
 
@@ -4341,20 +7076,77 @@ int main() {
     initTriggers();
 
 
-    initMap();
+    if( initMap() != true ) {
+        // cannot continue after map init fails
+        return 1;
+        }
     
+
+
+    if( false ) {
+        
+        printf( "Running map sampling\n" );
+    
+        int idA = 290;
+        int idB = 942;
+        
+        int totalCountA = 0;
+        int totalCountB = 0;
+        int numRuns = 2;
+
+        for( int i=0; i<numRuns; i++ ) {
+        
+        
+            int countA = 0;
+            int countB = 0;
+        
+            int x = randSource.getRandomBoundedInt( 10000, 300000 );
+            int y = randSource.getRandomBoundedInt( 10000, 300000 );
+        
+            printf( "Sampling at %d,%d\n", x, y );
+
+
+            for( int yd=y; yd<y + 2400; yd++ ) {
+                for( int xd=x; xd<x + 2400; xd++ ) {
+                    int oID = getMapObject( xd, yd );
+                
+                    if( oID == idA ) {
+                        countA ++;
+                        }
+                    else if( oID == idB ) {
+                        countB ++;
+                        }
+                    }
+                }
+            printf( "   Count at %d,%d is %d = %d, %d = %d\n",
+                    x, y, idA, countA, idB, countB );
+
+            totalCountA += countA;
+            totalCountB += countB;
+            }
+        printf( "Average count %d (%s) = %f,  %d (%s) = %f  over %d runs\n",
+                idA, getObject( idA )->description, 
+                totalCountA / (double)numRuns,
+                idB, getObject( idB )->description, 
+                totalCountB / (double)numRuns,
+                numRuns );
+        printf( "Press ENTER to continue:\n" );
+    
+        int readInt;
+        scanf( "%d", &readInt );
+        }
+    
+
+
     
     int port = 
         SettingsManager::getIntSetting( "port", 5077 );
     
     
-    SocketPoll sockPoll;
     
+    SocketServer *server = new SocketServer( port, 256 );
     
-    
-    SocketServer server( port, 256 );
-    
-    sockPoll.addSocketServer( &server );
+    sockPoll.addSocketServer( server );
     
     AppLog::infoF( "Listening for connection on port %d", port );
 
@@ -4363,21 +7155,109 @@ int main() {
     // waiting in the buffer for a given socket
     char someClientMessageReceived = false;
     
+    
+    int shutdownMode = SettingsManager::getIntSetting( "shutdownMode", 0 );
+    int forceShutdownMode = 
+            SettingsManager::getIntSetting( "forceShutdownMode", 0 );
+        
 
     while( !quit ) {
-        
-        int shutdownMode = SettingsManager::getIntSetting( "shutdownMode", 0 );
-        
-        
-        apocalypseStep();
-        monumentStep();
-        
-        checkBackup();
 
-        stepFoodLog();
-        stepFailureLog();
+        double curStepTime = Time::getCurrentTime();
         
-        stepPlayerStats();
+        char periodicStepThisStep = false;
+        
+        if( curStepTime - lastPeriodicStepTime > periodicStepTime ) {
+            periodicStepThisStep = true;
+            lastPeriodicStepTime = curStepTime;
+            }
+        
+        
+        if( periodicStepThisStep ) {
+            shutdownMode = SettingsManager::getIntSetting( "shutdownMode", 0 );
+            forceShutdownMode = 
+                SettingsManager::getIntSetting( "forceShutdownMode", 0 );
+            
+            if( checkReadOnly() ) {
+                // read-only file system causes all kinds of weird 
+                // behavior
+                // shut this server down NOW
+                printf( "File system read only, forcing server shutdown.\n" );
+
+                // force-run cron script one time here
+                // this will send warning email to admin
+                // (cron jobs stop running if filesystem read-only)
+                system( "../scripts/checkServerRunningCron.sh" );
+
+                shutdownMode = 1;
+                forceShutdownMode = 1;
+                }
+            }
+        
+        
+        if( forceShutdownMode ) {
+            shutdownMode = 1;
+        
+            const char *shutdownMessage = "SD\n#";
+            int messageLength = strlen( shutdownMessage );
+            
+            // send everyone who's still alive a shutdown message
+            for( int i=0; i<players.size(); i++ ) {
+                LiveObject *nextPlayer = players.getElement( i );
+                
+                if( nextPlayer->error ) {
+                    continue;
+                    }
+
+                if( nextPlayer->connected ) {    
+                    nextPlayer->sock->send( 
+                        (unsigned char*)shutdownMessage, 
+                        messageLength,
+                        false, false );
+                
+                    nextPlayer->gotPartOfThisFrame = true;
+                    }
+                
+                // don't worry about num sent
+                // it's the last message to this client anyway
+                setDeathReason( nextPlayer, 
+                                "forced_shutdown" );
+                nextPlayer->error = true;
+                nextPlayer->errorCauseString =
+                    "Forced server shutdown";
+                }
+            }
+        else if( shutdownMode ) {
+            // any disconnected players should be killed now
+            for( int i=0; i<players.size(); i++ ) {
+                LiveObject *nextPlayer = players.getElement( i );
+                if( ! nextPlayer->error && ! nextPlayer->connected ) {
+                    
+                    setDeathReason( nextPlayer, 
+                                    "disconnect_shutdown" );
+                    
+                    nextPlayer->error = true;
+                    nextPlayer->errorCauseString =
+                        "Disconnected during shutdown";
+                    }
+                }
+            }
+        
+
+        if( periodicStepThisStep ) {
+            
+            apocalypseStep();
+            monumentStep();
+            
+            //checkBackup();
+
+            stepFoodLog();
+            stepFailureLog();
+            
+            stepPlayerStats();
+            stepLineageLog();
+            stepCurseServerRequests();
+            }
         
         
         int numLive = players.size();
@@ -4548,6 +7428,12 @@ int main() {
             pollTimeout = 0;
             }
 
+        if( tutorialLoadingPlayers.size() > 0 ) {
+            // don't wait at all if there are tutorial maps to load
+            pollTimeout = 0;
+            }
+
+
         // we thus use zero CPU as long as no messages or new connections
         // come in, and only wake up when some timed action needs to be
         // handled
@@ -4559,10 +7445,20 @@ int main() {
         
         if( readySock != NULL && !readySock->isSocket ) {
             // server ready
-            Socket *sock = server.acceptConnection( 0 );
+            Socket *sock = server->acceptConnection( 0 );
 
             if( sock != NULL ) {
-                AppLog::info( "Got connection" );                
+                HostAddress *a = sock->getRemoteHostAddress();
+                
+                if( a == NULL ) {    
+                    AppLog::info( "Got connection from unknown address" );
+                    }
+                else {
+                    AppLog::infoF( "Got connection from %s:%d",
+                                  a->mAddressString, a->mPort );
+                    delete a;
+                    }
+            
 
                 FreshConnection newConnection;
                 
@@ -4574,6 +7470,35 @@ int main() {
                 newConnection.sock = sock;
 
                 newConnection.sequenceNumber = nextSequenceNumber;
+
+                
+
+                char *secretString = 
+                    SettingsManager::getStringSetting( 
+                        "statsServerSharedSecret", "sdfmlk3490sadfm3ug9324" );
+
+                char *numberString = 
+                    autoSprintf( "%lu", newConnection.sequenceNumber );
+                
+                char *nonce = hmac_sha1( secretString, numberString );
+
+                delete [] secretString;
+                delete [] numberString;
+
+                newConnection.sequenceNumberString = 
+                    autoSprintf( "%s%lu", nonce, 
+                                 newConnection.sequenceNumber );
+                
+                delete [] nonce;
+                    
+
+                newConnection.tutorialNumber = 0;
+                newConnection.curseStatus.curseLevel = 0;
+                newConnection.curseStatus.excessPoints = 0;
+
+                newConnection.twinCode = NULL;
+                newConnection.twinCount = 0;
+                
                 
                 nextSequenceNumber ++;
                 
@@ -4617,10 +7542,10 @@ int main() {
                 else {
                     message = autoSprintf( "SN\n"
                                            "%d/%d\n"
-                                           "%lu\n"
+                                           "%s\n"
                                            "%lu\n#",
                                            currentPlayers, maxPlayers,
-                                           newConnection.sequenceNumber,
+                                           newConnection.sequenceNumberString,
                                            versionNumber );
                     newConnection.shutdownMode = false;
                     }
@@ -4671,16 +7596,40 @@ int main() {
         
         
         // listen for messages from new connections
-
+        double currentTime = Time::getCurrentTime();
+        
         for( int i=0; i<newConnections.size(); i++ ) {
             
             FreshConnection *nextConnection = newConnections.getElement( i );
             
+            
+            if( nextConnection->email != NULL &&
+                nextConnection->curseStatus.curseLevel == -1 ) {
+                // keep checking if curse level has arrived from
+                // curse server
+                nextConnection->curseStatus =
+                    getCurseLevel( nextConnection->email );
+                if( nextConnection->curseStatus.curseLevel != -1 ) {
+                    AppLog::infoF( 
+                        "Got curse level for %s from curse server: "
+                        "%d (excess %d)",
+                        nextConnection->email,
+                        nextConnection->curseStatus.curseLevel,
+                        nextConnection->curseStatus.excessPoints );
+                    }
+                }
+            else if( nextConnection->ticketServerRequest != NULL ) {
+                
+                int result;
 
-            if( nextConnection->ticketServerRequest != NULL ) {
-                
-                int result = nextConnection->ticketServerRequest->step();
-                
+                if( currentTime - nextConnection->ticketServerRequestStartTime
+                    < 8 ) {
+                    // 8-second timeout on ticket server requests
+                    result = nextConnection->ticketServerRequest->step();
+                    }
+                else {
+                    result = -1;
+                    }
 
                 if( result == -1 ) {
                     AppLog::info( "Request to ticket server failed, "
@@ -4731,12 +7680,31 @@ int main() {
                             
                             AppLog::info( "Got new player logged in" );
                             
-                            processLoggedInPlayer( 
-                                nextConnection->sock,
-                                nextConnection->sockBuffer,
-                                nextConnection->email );
-                            
                             delete nextConnection->ticketServerRequest;
+                            nextConnection->ticketServerRequest = NULL;
+
+                            delete [] nextConnection->sequenceNumberString;
+                            nextConnection->sequenceNumberString = NULL;
+                            
+                            if( nextConnection->twinCode != NULL
+                                && 
+                                nextConnection->twinCount > 0 ) {
+                                processWaitingTwinConnection( *nextConnection );
+                                }
+                            else {
+                                if( nextConnection->twinCode != NULL ) {
+                                    delete [] nextConnection->twinCode;
+                                    nextConnection->twinCode = NULL;
+                                    }
+                                
+                                processLoggedInPlayer( 
+                                    nextConnection->sock,
+                                    nextConnection->sockBuffer,
+                                    nextConnection->email,
+                                    nextConnection->tutorialNumber,
+                                    nextConnection->curseStatus );
+                                }
+                                                        
                             newConnections.deleteElement( i );
                             i--;
                             }
@@ -4792,13 +7760,38 @@ int main() {
                         SimpleVector<char *> *tokens =
                             tokenizeString( message );
                         
-                        if( tokens->size() == 4 ) {
+                        if( tokens->size() == 4 || tokens->size() == 5 ||
+                            tokens->size() == 7 ) {
                             
                             nextConnection->email = 
                                 stringDuplicate( 
                                     tokens->getElementDirect( 1 ) );
                             char *pwHash = tokens->getElementDirect( 2 );
                             char *keyHash = tokens->getElementDirect( 3 );
+                            
+                            if( tokens->size() >= 5 ) {
+                                sscanf( tokens->getElementDirect( 4 ),
+                                        "%d", 
+                                        &( nextConnection->tutorialNumber ) );
+                                }
+                            
+                            if( tokens->size() == 7 ) {
+                                nextConnection->twinCode =
+                                    stringDuplicate( 
+                                        tokens->getElementDirect( 5 ) );
+                                
+                                sscanf( tokens->getElementDirect( 6 ),
+                                        "%d", 
+                                        &( nextConnection->twinCount ) );
+
+                                int maxCount = 
+                                    SettingsManager::getIntSetting( 
+                                        "maxTwinPartySize", 4 );
+                                
+                                if( nextConnection->twinCount > maxCount ) {
+                                    nextConnection->twinCount = maxCount;
+                                    }
+                                }
                             
 
                             char emailAlreadyLoggedIn = false;
@@ -4808,7 +7801,9 @@ int main() {
                                 LiveObject *o = players.getElement( p );
                                 
 
-                                if( strcmp( o->email, 
+                                if( ! o->error && 
+                                    o->connected && 
+                                    strcmp( o->email, 
                                             nextConnection->email ) == 0 ) {
                                     emailAlreadyLoggedIn = true;
                                     break;
@@ -4825,20 +7820,25 @@ int main() {
                                 nextConnection->error = true;
                                 nextConnection->errorCauseString =
                                     "Duplicate email";
+                                nextConnection->curseStatus.curseLevel = 0;
+                                nextConnection->curseStatus.excessPoints = 0;
                                 }
+                            else {
+                                // this may return -1 if curse server
+                                // request is pending
+                                // we'll catch that case later above
+                                nextConnection->curseStatus =
+                                    getCurseLevel( nextConnection->email );
+                                }
+                            
 
                             if( requireClientPassword &&
                                 ! nextConnection->error  ) {
 
-                                char *value = 
-                                    autoSprintf( 
-                                        "%d",
-                                        nextConnection->sequenceNumber );
-                                
-                                char *trueHash = hmac_sha1( clientPassword, 
-                                                            value );
-
-                                delete [] value;
+                                char *trueHash = 
+                                    hmac_sha1( 
+                                        clientPassword, 
+                                        nextConnection->sequenceNumberString );
                                 
 
                                 if( strcmp( trueHash, pwHash ) != 0 ) {
@@ -4863,17 +7863,20 @@ int main() {
                                     "%s?action=check_ticket_hash"
                                     "&email=%s"
                                     "&hash_value=%s"
-                                    "&string_to_hash=%lu",
+                                    "&string_to_hash=%s",
                                     ticketServerURL,
                                     encodedEmail,
                                     keyHash,
-                                    nextConnection->sequenceNumber );
+                                    nextConnection->sequenceNumberString );
 
                                 delete [] encodedEmail;
 
                                 nextConnection->ticketServerRequest =
                                     new WebRequest( "GET", url, NULL );
                                 
+                                nextConnection->ticketServerRequestStartTime
+                                    = currentTime;
+
                                 delete [] url;
                                 }
                             else if( !requireTicketServerCheck &&
@@ -4905,12 +7908,33 @@ int main() {
                             
                                     AppLog::info( "Got new player logged in" );
                                     
-                                    processLoggedInPlayer( 
-                                        nextConnection->sock,
-                                        nextConnection->sockBuffer,
-                                        nextConnection->email );
-                                    
                                     delete nextConnection->ticketServerRequest;
+                                    nextConnection->ticketServerRequest = NULL;
+                                    
+                                    delete [] 
+                                        nextConnection->sequenceNumberString;
+                                    nextConnection->sequenceNumberString = NULL;
+
+
+                                    if( nextConnection->twinCode != NULL
+                                        && 
+                                        nextConnection->twinCount > 0 ) {
+                                        processWaitingTwinConnection(
+                                            *nextConnection );
+                                        }
+                                    else {
+                                        if( nextConnection->twinCode != NULL ) {
+                                            delete [] nextConnection->twinCode;
+                                            nextConnection->twinCode = NULL;
+                                            }
+                                        processLoggedInPlayer( 
+                                            nextConnection->sock,
+                                            nextConnection->sockBuffer,
+                                            nextConnection->email,
+                                            nextConnection->tutorialNumber,
+                                            nextConnection->curseStatus );
+                                        }
+                                                                        
                                     newConnections.deleteElement( i );
                                     i--;
                                     }
@@ -4955,44 +7979,128 @@ int main() {
                 }
             }
             
+
+
+        // make sure all twin-waiting sockets are still connected
+        for( int i=0; i<waitingForTwinConnections.size(); i++ ) {
+            FreshConnection *nextConnection = 
+                waitingForTwinConnections.getElement( i );
+            
+            char result = 
+                readSocketFull( nextConnection->sock,
+                                nextConnection->sockBuffer );
+            
+            if( ! result ) {
+                AppLog::info( "Failed to read from twin-waiting client socket, "
+                              "client rejected." );
+                nextConnection->error = true;
+                nextConnection->errorCauseString =
+                    "Socket read failed";
+                }
+            }
             
         
 
         // now clean up any new connections that have errors
         
-        for( int i=0; i<newConnections.size(); i++ ) {
+        // FreshConnections are in two different lists
+        // clean up errors in both
+        SimpleVector<FreshConnection> *connectionLists[2] =
+            { &newConnections, &waitingForTwinConnections };
+        for( int c=0; c<2; c++ ) {
+            SimpleVector<FreshConnection> *list = connectionLists[c];
+        
+            for( int i=0; i<list->size(); i++ ) {
             
-            FreshConnection *nextConnection = newConnections.getElement( i );
+                FreshConnection *nextConnection = list->getElement( i );
             
-            if( nextConnection->error ) {
+                if( nextConnection->error ) {
                 
-                // try sending REJECTED message at end
+                    // try sending REJECTED message at end
 
-                const char *message = "REJECTED\n#";
-                nextConnection->sock->send( (unsigned char*)message,
-                                            strlen( message ), false, false );
+                    const char *message = "REJECTED\n#";
+                    nextConnection->sock->send( (unsigned char*)message,
+                                                strlen( message ), 
+                                                false, false );
 
-                AppLog::infoF( "Closing new connection on error "
-                               "(cause: %s)",
-                               nextConnection->errorCauseString );
+                    AppLog::infoF( "Closing new connection on error "
+                                   "(cause: %s)",
+                                   nextConnection->errorCauseString );
 
-                delete nextConnection->sock;
-                delete nextConnection->sockBuffer;
-                
-                if( nextConnection->ticketServerRequest != NULL ) {
-                    delete nextConnection->ticketServerRequest;
+                    sockPoll.removeSocket( nextConnection->sock );
+                    
+                    deleteMembers( nextConnection );
+                    
+                    list->deleteElement( i );
+                    i--;
                     }
-                
-                if( nextConnection->email != NULL ) {
-                    delete [] nextConnection->email;
-                    }
-
-                newConnections.deleteElement( i );
-                i--;
                 }
             }
-        
     
+
+        // step tutorial map load for player at front of line
+        
+        // 5 ms
+        double timeLimit = 0.005;
+        
+        for( int i=0; i<tutorialLoadingPlayers.size(); i++ ) {
+            LiveObject *nextPlayer = tutorialLoadingPlayers.getElement( i );
+            
+            char moreLeft = loadTutorialStep( &( nextPlayer->tutorialLoad ),
+                                              timeLimit );
+            
+            if( moreLeft ) {
+                // only load one step from first in line
+                break;
+                }
+            
+            // first in line is done
+            
+            AppLog::infoF( "New player %s tutorial loaded after %u steps, "
+                           "%f total sec (loadID = %u )",
+                           nextPlayer->email,
+                           nextPlayer->tutorialLoad.stepCount,
+                           Time::getCurrentTime() - 
+                           nextPlayer->tutorialLoad.startTime,
+                           nextPlayer->tutorialLoad.uniqueLoadID );
+
+            // remove it and any twins
+            unsigned int uniqueID = nextPlayer->tutorialLoad.uniqueLoadID;
+            
+
+            players.push_back( *nextPlayer );
+
+            tutorialLoadingPlayers.deleteElement( i );
+            
+            LiveObject *twinPlayer = NULL;
+            
+            if( i < tutorialLoadingPlayers.size() ) {
+                twinPlayer = tutorialLoadingPlayers.getElement( i );
+                }
+            
+            while( twinPlayer != NULL && 
+                   twinPlayer->tutorialLoad.uniqueLoadID == uniqueID ) {
+                
+                AppLog::infoF( "Twin %s tutorial loaded too (loadID = %u )",
+                               twinPlayer->email,
+                               uniqueID );
+            
+                players.push_back( *twinPlayer );
+
+                tutorialLoadingPlayers.deleteElement( i );
+                
+                twinPlayer = NULL;
+                
+                if( i < tutorialLoadingPlayers.size() ) {
+                    twinPlayer = tutorialLoadingPlayers.getElement( i );
+                    }
+                }
+            break;
+            
+            }
+        
+
+
         
     
         someClientMessageReceived = false;
@@ -5008,27 +8116,40 @@ int main() {
         
         SimpleVector<int> playerIndicesToSendLineageAbout;
 
+        SimpleVector<int> playerIndicesToSendCursesAbout;
+
         SimpleVector<int> playerIndicesToSendNamesAbout;
 
         SimpleVector<int> playerIndicesToSendDyingAbout;
 
-        // accumulated text of update lines
-        SimpleVector<char> newUpdates;
+        SimpleVector<int> playerIndicesToSendHealingAbout;
+
+        SimpleVector<GraveInfo> newGraves;
+        SimpleVector<GraveMoveInfo> newGraveMoves;
+
+        SimpleVector<int> newEmotPlayerIDs;
+        SimpleVector<int> newEmotIndices;
+        // 0 if no ttl specified
+        SimpleVector<int> newEmotTTLs;
+
+
+        SimpleVector<UpdateRecord> newUpdates;
         SimpleVector<ChangePosition> newUpdatesPos;
         SimpleVector<int> newUpdatePlayerIDs;
 
 
-        // separate accumulated text of updates for player deletes
         // these are global, so they're not tagged with positions for
         // spatial filtering
-        SimpleVector<char> newDeleteUpdates;
+        SimpleVector<UpdateRecord> newDeleteUpdates;
         
 
-        SimpleVector<char> mapChanges;
+        SimpleVector<MapChangeRecord> mapChanges;
         SimpleVector<ChangePosition> mapChangesPos;
         
-        SimpleVector<char> newSpeech;
-        SimpleVector<ChangePosition> newSpeechPos;
+
+        SimpleVector<FlightDest> newFlightDest;
+        
+
 
         
         timeSec_t curLookTime = Time::timeSec();
@@ -5040,43 +8161,243 @@ int main() {
 
             if( nextPlayer->error ) {
                 continue;
+                }            
+
+            double curCrossTime = Time::getCurrentTime();
+
+            char checkCrossing = true;
+            
+            if( curCrossTime < nextPlayer->playerCrossingCheckTime +
+                playerCrossingCheckStepTime ) {
+                // player not due for another check yet
+                checkCrossing = false;
+                }
+            else {
+                // time for next check for this player
+                nextPlayer->playerCrossingCheckTime = curCrossTime;
+                checkCrossing = true;
                 }
             
-            GridPos curPos = { nextPlayer->xd, nextPlayer->yd };
             
-            if( nextPlayer->xd != nextPlayer->xs ||
-                nextPlayer->yd != nextPlayer->ys ) {
-                
-                curPos = computePartialMoveSpot( nextPlayer );
-                }
+            if( checkCrossing ) {
+                GridPos curPos = { nextPlayer->xd, nextPlayer->yd };
             
-            int curOverID = getMapObject( curPos.x, curPos.y );
+                if( nextPlayer->xd != nextPlayer->xs ||
+                    nextPlayer->yd != nextPlayer->ys ) {
+                
+                    curPos = computePartialMoveSpot( nextPlayer );
+                    }
+            
+                int curOverID = getMapObject( curPos.x, curPos.y );
             
 
-            if( ! nextPlayer->heldByOther &&
-                curOverID != 0 && 
-                ! isMapObjectInTransit( curPos.x, curPos.y ) ) {
+                if( ! nextPlayer->heldByOther &&
+                    curOverID != 0 && 
+                    ! isMapObjectInTransit( curPos.x, curPos.y ) &&
+                    ! wasRecentlyDeadly( curPos ) ) {
                 
-                ObjectRecord *curOverObj = getObject( curOverID );
+                    ObjectRecord *curOverObj = getObject( curOverID );
                 
-                if( curOverObj->permanent && curOverObj->deadlyDistance > 0 ) {
-                    
-                    setDeathReason( nextPlayer, 
-                                    "killed",
-                                    curOverID );
-
-                    nextPlayer->error = true;
-                    nextPlayer->errorCauseString =
-                        "Player killed by permanent object";
-
-                    // generic on-person
-                    TransRecord *r = 
-                        getPTrans( curOverID, 0 );
-
-                    if( r != NULL ) {
-                        setMapObject( curPos.x, curPos.y, r->newActor );
+                    char riding = false;
+                
+                    if( nextPlayer->holdingID > 0 && 
+                        getObject( nextPlayer->holdingID )->rideable ) {
+                        riding = true;
                         }
-                    continue;
+
+                    if( !riding &&
+                        curOverObj->permanent && 
+                        curOverObj->deadlyDistance > 0 ) {
+                    
+                        char wasSick = false;
+                                        
+                        if( nextPlayer->holdingID > 0 &&
+                            strstr(
+                                getObject( nextPlayer->holdingID )->
+                                description,
+                                "sick" ) != NULL ) {
+                            wasSick = true;
+                            }
+
+
+                        addDeadlyMapSpot( curPos );
+                    
+                        setDeathReason( nextPlayer, 
+                                        "killed",
+                                        curOverID );
+                    
+                        nextPlayer->deathSourceID = curOverID;
+                    
+                        if( curOverObj->isUseDummy ) {
+                            nextPlayer->deathSourceID = 
+                                curOverObj->useDummyParent;
+                            }
+
+                        nextPlayer->errorCauseString =
+                            "Player killed by permanent object";
+                    
+                        if( ! nextPlayer->dying || wasSick ) {
+                            // if was sick, they had a long stagger
+                            // time set, so cutting it in half makes no sense
+                        
+                            int staggerTime = 
+                                SettingsManager::getIntSetting(
+                                    "deathStaggerTime", 20 );
+                        
+                            double currentTime = 
+                                Time::getCurrentTime();
+                        
+                            nextPlayer->dying = true;
+                            nextPlayer->dyingETA = 
+                                currentTime + staggerTime;
+
+                            playerIndicesToSendDyingAbout.
+                                push_back( 
+                                    getLiveObjectIndex( 
+                                        nextPlayer->id ) );
+                            }
+                        else {
+                            // already dying, and getting attacked again
+                        
+                            // halve their remaining stagger time
+                            double currentTime = 
+                                Time::getCurrentTime();
+                        
+                            double staggerTimeLeft = 
+                                nextPlayer->dyingETA - currentTime;
+                        
+                            if( staggerTimeLeft > 0 ) {
+                                staggerTimeLeft /= 2;
+                                nextPlayer->dyingETA = 
+                                    currentTime + staggerTimeLeft;
+                                }
+                            }
+                
+                    
+                        // generic on-person
+                        TransRecord *r = 
+                            getPTrans( curOverID, 0 );
+
+                        if( r != NULL ) {
+                            setMapObject( curPos.x, curPos.y, r->newActor );
+
+                            // new target specifies wound
+                            // but never replace an existing wound
+                            // death time is shortened above
+                            // however, wounds can replace sickness 
+                            if( r->newTarget > 0 &&
+                                ( ! nextPlayer->holdingWound || wasSick ) ) {
+                                // don't drop their wound
+                                if( nextPlayer->holdingID != 0 &&
+                                    ! nextPlayer->holdingWound ) {
+                                    handleDrop( 
+                                        curPos.x, curPos.y, 
+                                        nextPlayer,
+                                        &playerIndicesToSendUpdatesAbout );
+                                    }
+                                nextPlayer->holdingID = 
+                                    r->newTarget;
+                                holdingSomethingNew( nextPlayer );
+                            
+                                setFreshEtaDecayForHeld( nextPlayer );
+                            
+                                char isSick = false;
+                            
+                                if( strstr(
+                                        getObject( nextPlayer->holdingID )->
+                                        description,
+                                        "sick" ) != NULL ) {
+                                    isSick = true;
+
+                                    // sicknesses override basic death-stagger
+                                    // time.  The person can live forever
+                                    // if they are taken care of until
+                                    // the sickness passes
+                                
+                                    int staggerTime = 
+                                        SettingsManager::getIntSetting(
+                                            "deathStaggerTime", 20 );
+                                
+                                    double currentTime = 
+                                        Time::getCurrentTime();
+
+                                    // 10x base stagger time should
+                                    // give them enough time to either heal
+                                    // from the disease or die from its
+                                    // side-effects
+                                    nextPlayer->dyingETA = 
+                                        currentTime + 10 * staggerTime;
+                                    }
+
+                                if( isSick ) {
+                                    // what they have will heal on its own 
+                                    // with time.  Sickness, not wound.
+                                
+                                    // death source is sickness, not
+                                    // source
+                                    nextPlayer->deathSourceID = 
+                                        nextPlayer->holdingID;
+                                
+                                    setDeathReason( nextPlayer, 
+                                                    "succumbed",
+                                                    nextPlayer->holdingID );
+                                    }
+                            
+                                nextPlayer->holdingWound = true;
+                            
+                                ForcedEffects e = 
+                                    checkForForcedEffects( 
+                                        nextPlayer->holdingID );
+                            
+                                if( e.emotIndex != -1 ) {
+                                    nextPlayer->emotFrozen = true;
+                                    newEmotPlayerIDs.push_back( 
+                                        nextPlayer->id );
+                                    newEmotIndices.push_back( e.emotIndex );
+                                    newEmotTTLs.push_back( e.ttlSec );
+                                    }
+                                if( e.foodModifierSet && 
+                                    e.foodCapModifier != 1 ) {
+                                
+                                    nextPlayer->foodCapModifier = 
+                                        e.foodCapModifier;
+                                    nextPlayer->foodUpdate = true;
+                                    }
+                                if( e.feverSet ) {
+                                    nextPlayer->fever = e.fever;
+                                    }
+                            
+
+                                playerIndicesToSendUpdatesAbout.
+                                    push_back( 
+                                        getLiveObjectIndex( 
+                                            nextPlayer->id ) );
+                                }
+                            }
+                        }
+                    else if( riding && 
+                             curOverObj->permanent && 
+                             curOverObj->deadlyDistance > 0 ) {
+                        // rode over something deadly
+                        // see if it affects what we're riding
+
+                        TransRecord *r = 
+                            getPTrans( nextPlayer->holdingID, curOverID );
+                    
+                        if( r != NULL ) {
+                            handleHoldingChange( nextPlayer,
+                                                 r->newActor );
+                            nextPlayer->heldTransitionSourceID = curOverID;
+                            playerIndicesToSendUpdatesAbout.push_back( i );
+
+                            setMapObject( curPos.x, curPos.y, r->newTarget );
+
+                            // it attacked their vehicle 
+                            // put it on cooldown so it won't immediately
+                            // attack them
+                            addDeadlyMapSpot( curPos );
+                            }
+                        }                
                     }
                 }
             
@@ -5087,19 +8408,22 @@ int main() {
                 nextPlayer->lastRegionLookTime = curLookTime;
                 }
 
+            char *message = NULL;
             
-            char result = 
-                readSocketFull( nextPlayer->sock, nextPlayer->sockBuffer );
+            if( nextPlayer->connected ) {    
+                char result = 
+                    readSocketFull( nextPlayer->sock, nextPlayer->sockBuffer );
             
-            if( ! result ) {
-                setDeathReason( nextPlayer, "disconnected" );
-                
-                nextPlayer->error = true;
-                nextPlayer->errorCauseString =
-                    "Socket read failed";
+                if( ! result ) {
+                    setPlayerDisconnected( nextPlayer, "Socket read failed" );
+                    }
+                else {
+                    // don't even bother parsing message buffer for players
+                    // that are not currently connected
+                    message = getNextClientMessage( nextPlayer->sockBuffer );
+                    }
                 }
-
-            char *message = getNextClientMessage( nextPlayer->sockBuffer );
+            
             
             if( message != NULL ) {
                 someClientMessageReceived = true;
@@ -5107,14 +8431,14 @@ int main() {
                 AppLog::infoF( "Got client message from %d: %s",
                                nextPlayer->id, message );
                 
-                ClientMessage m = parseMessage( message );
+                ClientMessage m = parseMessage( nextPlayer, message );
                 
                 delete [] message;
                 
                 if( m.type == UNKNOWN ) {
                     AppLog::info( "Client error, unknown message type." );
                     
-                    setDeathReason( nextPlayer, "disconnected" );
+                    setDeathReason( nextPlayer, "unknown_message" );
 
                     nextPlayer->error = true;
                     nextPlayer->errorCauseString =
@@ -5188,28 +8512,28 @@ int main() {
                         }
                     
 
-                    if( allow ) {
+                    if( allow && nextPlayer->connected ) {
                         int length;
                         unsigned char *mapChunkMessage = 
                             getChunkMessage( m.x - chunkDimensionX / 2, 
                                              m.y - chunkDimensionY / 2,
                                              chunkDimensionX,
-                                             chunkDimensionY, 
+                                             chunkDimensionY,
+                                             nextPlayer->birthPos,
                                              &length );
                         
                         int numSent = 
                             nextPlayer->sock->send( mapChunkMessage, 
                                                     length, 
                                                     false, false );
-                
+                        
+                        nextPlayer->gotPartOfThisFrame = true;
+                        
                         delete [] mapChunkMessage;
 
                         if( numSent != length ) {
-                            setDeathReason( nextPlayer, "disconnected" );
-
-                            nextPlayer->error = true;
-                            nextPlayer->errorCauseString =
-                                "Socket write failed";
+                            setPlayerDisconnected( nextPlayer, 
+                                                   "Socket write failed" );
                             }
                         }
                     else {
@@ -5222,28 +8546,220 @@ int main() {
                         trigger( m.trigger );
                         }
                     }
-                // if player is still moving, ignore all actions
+                else if( m.type == FORCE ) {
+                    if( m.x == nextPlayer->xd &&
+                        m.y == nextPlayer->yd ) {
+                        
+                        // player has ack'ed their forced pos correctly
+                        
+                        // stop ignoring their messages now
+                        nextPlayer->waitingForForceResponse = false;
+                        }
+                    else {
+                        AppLog::infoF( 
+                            "FORCE message has unexpected "
+                            "absolute pos (%d,%d), expecting (%d,%d)",
+                            m.x, m.y,
+                            nextPlayer->xd, nextPlayer->yd );
+                        }
+                    }
+                else if( m.type == PING ) {
+                    // immediately send pong
+                    char *message = autoSprintf( "PONG\n%d#", m.id );
+
+                    sendMessageToPlayer( nextPlayer, message, 
+                                         strlen( message ) );
+                    delete [] message;
+                    }
+                else if( m.type == DIE ) {
+                    if( computeAge( nextPlayer ) < 1 &&
+                        nextPlayer->heldByOther &&
+                        nextPlayer->heldByOtherID == 
+                        nextPlayer->parentID ) {
+                        
+                        // killed self
+                        // SID triggers a lineage ban
+                        nextPlayer->suicide = true;
+
+                        setDeathReason( nextPlayer, "SID" );
+
+                        nextPlayer->error = true;
+                        nextPlayer->errorCauseString = "Baby suicide";
+                        int parentID = nextPlayer->heldByOtherID;
+                        
+                        LiveObject *parent = 
+                            getLiveObject( parentID );
+                        
+                        if( parent != NULL ) {
+                            // mother can have another baby right away
+                            parent->birthCoolDown = 0;
+                            
+                            int babyBonesID = 
+                                SettingsManager::getIntSetting( 
+                                    "babyBones", -1 );
+
+                            if( babyBonesID != -1 ) {
+                                ObjectRecord *babyBonesO = 
+                                    getObject( babyBonesID );
+                                
+                                if( babyBonesO != NULL ) {
+                                    
+                                    // don't leave grave on ground just yet
+                                    nextPlayer->customGraveID = 0;
+                            
+                                    GridPos parentPos = 
+                                        getPlayerPos( parent );
+
+                                    // put invisible grave there for now
+                                    GraveInfo graveInfo = { parentPos, 
+                                                            nextPlayer->id };
+                                    newGraves.push_back( graveInfo );
+                                    
+                                    parent->heldGraveOriginX = parentPos.x;
+                                    
+                                    parent->heldGraveOriginY = parentPos.y;
+                                 
+                                    playerIndicesToSendUpdatesAbout.push_back(
+                                        getLiveObjectIndex( parentID ) );
+                                    
+                                    // what if baby wearing clothes?
+                                    for( int c=0; 
+                                         c < NUM_CLOTHING_PIECES; 
+                                         c++ ) {
+                                             
+                                        ObjectRecord *cObj = clothingByIndex(
+                                            nextPlayer->clothing, c );
+                                        
+                                        if( cObj != NULL ) {
+                                            // put clothing in parent's hand
+                                            // and then drop
+                                            parent->holdingID = cObj->id;
+                                            if( nextPlayer->
+                                                clothingContained[c].
+                                                size() > 0 ) {
+                                                
+                                                parent->numContained =
+                                                    nextPlayer->
+                                                    clothingContained[c].
+                                                    size();
+                                                
+                                                parent->containedIDs =
+                                                    nextPlayer->
+                                                    clothingContained[c].
+                                                    getElementArray();
+                                                parent->containedEtaDecays =
+                                                    nextPlayer->
+                                                    clothingContainedEtaDecays
+                                                    [c].
+                                                    getElementArray();
+                                                
+                                                parent->subContainedIDs
+                                                    = new 
+                                                    SimpleVector<int>[
+                                                    parent->numContained ];
+                                                parent->subContainedEtaDecays
+                                                    = new 
+                                                    SimpleVector<timeSec_t>[
+                                                    parent->numContained ];
+                                                }
+                                            
+                                            handleDrop( 
+                                                parentPos.x, parentPos.y, 
+                                                parent,
+                                                NULL );
+                                            }
+                                        }
+                                    
+                                    // finally leave baby bones
+                                    // in their hands
+                                    parent->holdingID = babyBonesID;
+                                    
+                                    // this works to force client to play
+                                    // creation sound for baby bones.
+                                    parent->heldTransitionSourceID = 
+                                        nextPlayer->displayID;
+                                    
+                                    nextPlayer->heldByOther = false;
+                                    }
+                                }
+                            }
+                        // else let normal grave appear for this dead baby
+                        }
+                    }
+                else if( m.type != SAY && m.type != EMOT &&
+                         nextPlayer->waitingForForceResponse ) {
+                    // if we're waiting for a FORCE response, ignore
+                    // all messages from player except SAY and EMOT
+                    
+                    AppLog::infoF( "Ignoring client message because we're "
+                                   "waiting for FORCE ack message after a "
+                                   "forced-pos PU at (%d, %d), "
+                                   "relative=(%d, %d)",
+                                   nextPlayer->xd, nextPlayer->yd,
+                                   nextPlayer->xd - nextPlayer->birthPos.x,
+                                   nextPlayer->yd - nextPlayer->birthPos.y );
+                    }
+                // if player is still moving (or held by an adult), 
+                // ignore all actions
                 // except for move interrupts
                 else if( ( nextPlayer->xs == nextPlayer->xd &&
-                      nextPlayer->ys == nextPlayer->yd ) 
-                    ||
-                    m.type == MOVE ||
-                    m.type == SAY ) {
-                    
+                           nextPlayer->ys == nextPlayer->yd &&
+                           ! nextPlayer->heldByOther )
+                         ||
+                         m.type == MOVE ||
+                         m.type == JUMP || 
+                         m.type == SAY ||
+                         m.type == EMOT ) {
 
-                    if( m.type == MOVE && nextPlayer->heldByOther ) {
-                        // baby wiggling out of parent's arms
-                        handleForcedBabyDrop( 
-                            nextPlayer,
-                            &playerIndicesToSendUpdatesAbout );
+                    if( m.type == MOVE &&
+                        m.sequenceNumber != -1 ) {
+                        nextPlayer->lastMoveSequenceNumber = m.sequenceNumber;
+                        }
+
+                    if( ( m.type == MOVE || m.type == JUMP ) && 
+                        nextPlayer->heldByOther ) {
                         
-                        // drop them and ignore rest of their move
-                        // request, until they click again
+                        // only JUMP actually makes them jump out
+                        if( m.type == JUMP ) {
+                            // baby wiggling out of parent's arms
+                            
+                            // block them from wiggling from their own 
+                            // mother's arms if they are under 1
+                            
+                            if( computeAge( nextPlayer ) >= 1  ||
+                                nextPlayer->heldByOtherID != 
+                                nextPlayer->parentID ) {
+                                
+                                handleForcedBabyDrop( 
+                                    nextPlayer,
+                                    &playerIndicesToSendUpdatesAbout );
+                                }
+                            }
+                        
+                        // ignore their move requests while
+                        // in-arms, until they JUMP out
+                        }
+                    else if( m.type == MOVE && nextPlayer->holdingID > 0 &&
+                             getObject( nextPlayer->holdingID )->
+                             speedMult == 0 ) {
+                        // next player holding something that prevents
+                        // movement entirely
+                        printf( "  Processing move, "
+                                "but player holding a speed-0 object, "
+                                "ending now\n" );
+                        nextPlayer->xd = nextPlayer->xs;
+                        nextPlayer->yd = nextPlayer->ys;
+                        
+                        nextPlayer->posForced = true;
+                        
+                        // send update about them to end the move
+                        // right now
+                        playerIndicesToSendUpdatesAbout.push_back( i );
                         }
                     else if( m.type == MOVE ) {
                         //Thread::staticSleep( 1000 );
 
-
+                        /*
                         printf( "  Processing move, "
                                 "we think player at old start pos %d,%d\n",
                                 nextPlayer->xs,
@@ -5255,7 +8771,8 @@ int main() {
                                     nextPlayer->pathToDest[p].y );
                             }
                         printf( "\n" );
-
+                        */
+                        
                         char interrupt = false;
                         char pathPrefixAdded = false;
                         
@@ -5297,12 +8814,12 @@ int main() {
                                 cPos.y = nextPlayer->ys;
                                 }
                             
-                            
+                            /*
                             printf( "   we think player in motion or "
                                     "done moving at %d,%d\n",
                                     cPos.x,
                                     cPos.y );
-       
+                            */
                             nextPlayer->xs = cPos.x;
                             nextPlayer->ys = cPos.y;
                             
@@ -5359,10 +8876,11 @@ int main() {
                                     theirPathIndex = 0;
                                     }
                                 
-
+                                /*
                                 printf( "They are on our path at index %d\n",
                                         theirPathIndex );
-                                
+                                */
+
                                 // okay, they think they are on last path
                                 // that we had for them
 
@@ -5413,9 +8931,11 @@ int main() {
                                 // they are, and we don't need to prefix
                                 // their path
 
+                                /*
                                 printf( "Prefixing their path "
                                         "with %d steps\n",
                                         unfilteredPath.size() );
+                                */
                                 }
                             }
                         
@@ -5429,7 +8949,7 @@ int main() {
                             unfilteredPath.push_back( m.extraPos[p] );
                             }
                         
-
+                        /*
                         printf( "Unfiltered path = " );
                         for( int p=0; p<unfilteredPath.size(); p++ ) {
                             printf( "(%d, %d) ",
@@ -5437,6 +8957,7 @@ int main() {
                                     unfilteredPath.getElementDirect(p).y );
                             }
                         printf( "\n" );
+                        */
 
                         // remove any duplicate spots due to doubling back
 
@@ -5446,7 +8967,7 @@ int main() {
                                        unfilteredPath.getElementDirect(p) ) ) {
                                 unfilteredPath.deleteElement( p );
                                 p--;
-                                printf( "FOUND duplicate path element\n" );
+                                //printf( "FOUND duplicate path element\n" );
                                 }
                             }
                             
@@ -5464,15 +8985,17 @@ int main() {
 
                             // send update to terminate move right now
                             playerIndicesToSendUpdatesAbout.push_back( i );
+                            /*
                             printf( "A move that takes player "
                                     "where they already are, "
                                     "ending move now\n" );
+                            */
                             }
                         else {
                             // an actual move away from current xs,ys
 
                             if( interrupt ) {
-                                printf( "Got valid move interrupt\n" );
+                                //printf( "Got valid move interrupt\n" );
                                 }
                                 
 
@@ -5503,10 +9026,11 @@ int main() {
                                     break;
                                     }
                                 }
-                            
+                            /*
                             printf( "Start index = %d (startFound = %d)\n", 
                                     startIndex, startFound );
-                            
+                            */
+
                             if( ! startFound &&
                                 ! isGridAdjacentDiag( 
                                     unfilteredPath.
@@ -5644,19 +9168,22 @@ int main() {
                                                        startIndex );
                              
                                 double moveSpeed = computeMoveSpeed( 
-                                    nextPlayer );
+                                    nextPlayer ) *
+                                    getPathSpeedModifier( 
+                                        nextPlayer->pathToDest,
+                                        nextPlayer->pathLength );
                                 
                                 nextPlayer->moveTotalSeconds = dist / 
                                     moveSpeed;
                            
                                 double secondsAlreadyDone = distAlreadyDone / 
                                     moveSpeed;
-                                
+                                /*
                                 printf( "Skipping %f seconds along new %f-"
                                         "second path\n",
                                         secondsAlreadyDone, 
                                         nextPlayer->moveTotalSeconds );
-                                
+                                */
                                 nextPlayer->moveStartTime = 
                                     Time::getCurrentTime() - 
                                     secondsAlreadyDone;
@@ -5679,6 +9206,20 @@ int main() {
                             // truncate
                             m.saidText[ sayLimit ] = '\0';
                             }
+
+                        int len = strlen( m.saidText );
+                        
+                        // replace not-allowed characters with spaces
+                        for( int c=0; c<len; c++ ) {
+                            if( ! allowedSayCharMap[ 
+                                    (int)( m.saidText[c] ) ] ) {
+                                
+                                m.saidText[c] = ' ';
+                                }
+                            }
+                        
+
+
                         
                         if( nextPlayer->isEve && nextPlayer->name == NULL ) {
                             char *name = isFamilyNamingSay( m.saidText );
@@ -5688,18 +9229,22 @@ int main() {
                                 nextPlayer->name = autoSprintf( "%s %s",
                                                                 eveName, 
                                                                 close );
+                                nextPlayer->name = getUniqueCursableName( 
+                                    nextPlayer->name, 
+                                    &( nextPlayer->nameHasSuffix ) );
+
                                 logName( nextPlayer->id,
+                                         nextPlayer->email,
                                          nextPlayer->name );
                                 playerIndicesToSendNamesAbout.push_back( i );
                                 }
                             }
 
-                        if( nextPlayer->holdingID < 0 &&
-                            nextPlayer->babyIDs->size() > 0 &&
-                            nextPlayer->babyIDs->getElementIndex(
-                                - nextPlayer->holdingID ) != -1 ) {
+                        if( nextPlayer->holdingID < 0 ) {
 
-                            // we're holding one of our babies
+                            // we're holding a baby
+                            // (no longer matters if it's our own baby)
+                            // (we let adoptive parents name too)
                             
                             LiveObject *babyO =
                                 getLiveObject( - nextPlayer->holdingID );
@@ -5716,6 +9261,32 @@ int main() {
                                         if( lastName == NULL ) {
                                             lastName = "";
                                             }
+                                        else if( nextPlayer->nameHasSuffix ) {
+                                            // only keep last name
+                                            // if it contains another
+                                            // space (the suffix is after
+                                            // the last name).  Otherwise
+                                            // we are probably confused,
+                                            // and what we think
+                                            // is the last name IS the suffix.
+                                            
+                                            char *suffixPos =
+                                                strstr( (char*)&( lastName[1] ),
+                                                        " " );
+                                            
+                                            if( suffixPos == NULL ) {
+                                                // last name is suffix, actually
+                                                // don't pass suffix on to baby
+                                                lastName = "";
+                                                }
+                                            else {
+                                                // last name plus suffix
+                                                // okay to pass to baby
+                                                // because we strip off
+                                                // third part of name
+                                                // (suffix) below.
+                                                }
+                                            }
                                         }
 
                                     const char *close = 
@@ -5723,7 +9294,29 @@ int main() {
                                     babyO->name = autoSprintf( "%s%s",
                                                                close, 
                                                                lastName );
+
+                                    int spaceCount = 0;
+                                    int lastSpaceIndex = -1;
+
+                                    int nameLen = strlen( babyO->name );
+                                    for( int s=0; s<nameLen; s++ ) {
+                                        if( babyO->name[s] == ' ' ) {
+                                            lastSpaceIndex = s;
+                                            spaceCount++;
+                                            }
+                                        }
+                                    
+                                    if( spaceCount > 1 ) {
+                                        // remove suffix from end
+                                        babyO->name[ lastSpaceIndex ] = '\0';
+                                        }
+                                    
+                                    babyO->name = getUniqueCursableName( 
+                                        babyO->name, 
+                                        &( babyO->nameHasSuffix ) );
+                                    
                                     logName( babyO->id,
+                                             babyO->email,
                                              babyO->name );
                                     
                                     playerIndicesToSendNamesAbout.push_back( 
@@ -5731,33 +9324,101 @@ int main() {
                                     }
                                 }
                             }
+                        else {
+                            // not holding anyone
                         
-                        
+                            char *name = isBabyNamingSay( m.saidText );
+                                
+                            if( name != NULL && strcmp( name, "" ) != 0 ) {
+                                // still, check if we're naming a nearby,
+                                // nameless non-baby
+                                GridPos thisPos = getPlayerPos( nextPlayer );
+                                
+                                // don't consider anyone who is too far away
+                                double closestDist = 20;
+                                LiveObject *closestOther = NULL;
+                                
+                                for( int j=0; j<numLive; j++ ) {
+                                    LiveObject *otherPlayer = 
+                                        players.getElement(j);
+                                    
+                                    if( otherPlayer != nextPlayer &&
+                                        computeAge( otherPlayer ) >= babyAge &&
+                                        otherPlayer->name == NULL ) {
+                                        
+                                        GridPos otherPos = 
+                                            getPlayerPos( otherPlayer );
+                                        
+                                        double dist =
+                                            distance( thisPos, otherPos );
+                                        
+                                        if( dist < closestDist ) {
+                                            closestDist = dist;
+                                            closestOther = otherPlayer;
+                                            }
+                                        }
+                                    }
+                                if( closestOther != NULL ) {
+                                    const char *close = 
+                                        findCloseFirstName( name );
+                                    
+                                    closestOther->name = 
+                                        stringDuplicate( close );
+                                    
+                                    closestOther->name = getUniqueCursableName( 
+                                        closestOther->name,
+                                        &( closestOther->nameHasSuffix ) );
 
-                        
-                        char *line = autoSprintf( "%d %s\n", nextPlayer->id,
-                                                  m.saidText );
-                        
-                        newSpeech.appendElementString( line );
-                        
-                        delete [] line;
-                        
+                                    logName( closestOther->id,
+                                             closestOther->email,
+                                             closestOther->name );
+                                    
+                                    playerIndicesToSendNamesAbout.push_back( 
+                                        getLiveObjectIndex( 
+                                            closestOther->id ) );
+                                    }
+                                }
 
-                        
-                        ChangePosition p = { nextPlayer->xd, nextPlayer->yd, 
-                                             false };
-                        
-                        // if held, speech happens where held
-                        if( nextPlayer->heldByOther ) {
-                            LiveObject *holdingPlayer = 
-                                getLiveObject( nextPlayer->heldByOtherID );
-                
-                            p.x = holdingPlayer->xd;
-                            p.y = holdingPlayer->yd;
+                            // also check if we're holding something writable
+                            unsigned char metaData[ MAP_METADATA_LENGTH ];
+                            int len = strlen( m.saidText );
+                            
+                            if( nextPlayer->holdingID > 0 &&
+                                len < MAP_METADATA_LENGTH &&
+                                getObject( 
+                                    nextPlayer->holdingID )->writable &&
+                                // and no metadata already on it
+                                ! getMetadata( nextPlayer->holdingID, 
+                                               metaData ) ) {
+
+                                memset( metaData, 0, MAP_METADATA_LENGTH );
+                                memcpy( metaData, m.saidText, len + 1 );
+                                
+                                nextPlayer->holdingID = 
+                                    addMetadata( nextPlayer->holdingID,
+                                                 metaData );
+
+                                TransRecord *writingHappenTrans =
+                                    getMetaTrans( 0, nextPlayer->holdingID );
+                                
+                                if( writingHappenTrans != NULL &&
+                                    writingHappenTrans->newTarget > 0 &&
+                                    getObject( writingHappenTrans->newTarget )
+                                        ->written ) {
+                                    // bare hands transition going from
+                                    // writable to written
+                                    // use this to transform object in 
+                                    // hands as we write
+                                    handleHoldingChange( 
+                                        nextPlayer,
+                                        writingHappenTrans->newTarget );
+                                    playerIndicesToSendUpdatesAbout.
+                                        push_back( i );
+                                    }                    
+                                }    
                             }
-
-
-                        newSpeechPos.push_back( p );
+                        
+                        makePlayerSay( nextPlayer, m.saidText );
                         }
                     else if( m.type == KILL ) {
                         // send update even if action fails (to let them
@@ -5801,7 +9462,7 @@ int main() {
                                     
                                     // is anyone there?
                                     LiveObject *hitPlayer = 
-                                        getHitPlayer( m.x, m.y, true );
+                                        getHitPlayer( m.x, m.y, m.id, true );
                                     
                                     char someoneHit = false;
 
@@ -5814,6 +9475,23 @@ int main() {
                                         hitPlayer->murderSourceID =
                                             nextPlayer->holdingID;
                                         
+                                        hitPlayer->murderPerpID =
+                                            nextPlayer->id;
+                                        
+                                        // brand this player as a murderer
+                                        nextPlayer->everKilledAnyone = true;
+
+                                        if( hitPlayer->murderPerpEmail 
+                                            != NULL ) {
+                                            delete [] 
+                                                hitPlayer->murderPerpEmail;
+                                            }
+                                        
+                                        hitPlayer->murderPerpEmail =
+                                            stringDuplicate( 
+                                                nextPlayer->email );
+                                        
+
                                         setDeathReason( hitPlayer, 
                                                         "killed",
                                                         nextPlayer->holdingID );
@@ -5823,11 +9501,14 @@ int main() {
                                             int staggerTime = 
                                                 SettingsManager::getIntSetting(
                                                     "deathStaggerTime", 20 );
-
+                                            
+                                            double currentTime = 
+                                                Time::getCurrentTime();
+                                            
                                             hitPlayer->dying = true;
                                             hitPlayer->dyingETA = 
-                                                Time::getCurrentTime() + 
-                                                staggerTime;
+                                                currentTime + staggerTime;
+
                                             playerIndicesToSendDyingAbout.
                                                 push_back( 
                                                     getLiveObjectIndex( 
@@ -5835,27 +9516,27 @@ int main() {
                                         
                                             hitPlayer->errorCauseString =
                                                 "Player killed by other player";
-                                        
-                                            logDeath( hitPlayer->id,
-                                                      hitPlayer->email,
-                                                      hitPlayer->isEve,
-                                                      computeAge( hitPlayer ),
-                                                      getSecondsPlayed( 
-                                                          hitPlayer ),
-                                                      ! getFemale( hitPlayer ),
-                                                      m.x, m.y,
-                                                      players.size() - 1,
-                                                      false,
-                                                      nextPlayer->id,
-                                                      nextPlayer->email );
-                                            
-                                            if( shutdownMode ) {
-                                                handleShutdownDeath( 
-                                                    hitPlayer, m.x, m.y );
-                                                }
-
-                                            hitPlayer->deathLogged = true;
                                             }
+                                         else {
+                                             // already dying, 
+                                             // and getting attacked again
+                        
+                                             // halve their remaining 
+                                             // stagger time
+                                             double currentTime = 
+                                                 Time::getCurrentTime();
+                                             
+                                             double staggerTimeLeft = 
+                                                 hitPlayer->dyingETA - 
+                                                 currentTime;
+                        
+                                             if( staggerTimeLeft > 0 ) {
+                                                 staggerTimeLeft /= 2;
+                                                 hitPlayer->dyingETA = 
+                                                     currentTime + 
+                                                     staggerTimeLeft;
+                                                 }
+                                             }
                                         }
                                     
                                     
@@ -5870,6 +9551,7 @@ int main() {
                                                   0 );
 
                                     TransRecord *rHit = NULL;
+                                    TransRecord *woundHit = NULL;
                                     
                                     if( someoneHit ) {
                                         // last use on target specifies
@@ -5886,10 +9568,21 @@ int main() {
                                             hitPlayer->customGraveID = 
                                                 rHit->newTarget;
                                             }
+                                        
+                                        char wasSick = false;
+                                        
+                                        if( hitPlayer->holdingID > 0 &&
+                                            strstr(
+                                                getObject( 
+                                                    hitPlayer->holdingID )->
+                                                description,
+                                                "sick" ) != NULL ) {
+                                            wasSick = true;
+                                            }
 
                                         // last use on actor specifies
                                         // what is left in victim's hand
-                                        TransRecord *woundHit = 
+                                        woundHit = 
                                             getPTrans( nextPlayer->holdingID, 
                                                       0, true, false );
                                         
@@ -5904,15 +9597,74 @@ int main() {
                                                     hitPlayer,
                                              &playerIndicesToSendUpdatesAbout );
                                                 }
-                                            hitPlayer->holdingID = 
-                                                woundHit->newTarget;
+
+                                            // give them a new wound
+                                            // if they don't already have
+                                            // one, but never replace their
+                                            // original wound.  That allows
+                                            // a healing exploit where you
+                                            // intentionally give someone
+                                            // an easier-to-treat wound
+                                            // to replace their hard-to-treat
+                                            // wound
+
+                                            // however, do let wounds replace
+                                            // sickness
+                                            char woundChange = false;
+                                            
+                                            if( ! hitPlayer->holdingWound ||
+                                                wasSick ) {
+                                                woundChange = true;
+                                                
+                                                hitPlayer->holdingID = 
+                                                    woundHit->newTarget;
+                                                holdingSomethingNew( 
+                                                    hitPlayer );
+                                                setFreshEtaDecayForHeld( 
+                                                    hitPlayer );
+                                                }
+                                            
+                                            
                                             hitPlayer->holdingWound = true;
                                             
-                                            playerIndicesToSendUpdatesAbout.
-                                                push_back( 
-                                                    getLiveObjectIndex( 
-                                                        hitPlayer->id ) );
-                                            }   
+                                            if( woundChange ) {
+                                                
+                                                ForcedEffects e = 
+                                                    checkForForcedEffects( 
+                                                        hitPlayer->holdingID );
+                            
+                                                if( e.emotIndex != -1 ) {
+                                                    hitPlayer->emotFrozen = 
+                                                        true;
+                                                    newEmotPlayerIDs.push_back( 
+                                                        hitPlayer->id );
+                                                    newEmotIndices.push_back( 
+                                                        e.emotIndex );
+                                                    newEmotTTLs.push_back( 
+                                                        e.ttlSec );
+                                                    }
+                                            
+                                                if( e.foodModifierSet && 
+                                                    e.foodCapModifier != 1 ) {
+                                                
+                                                    hitPlayer->
+                                                        foodCapModifier = 
+                                                        e.foodCapModifier;
+                                                    hitPlayer->foodUpdate = 
+                                                        true;
+                                                    }
+                                                
+                                                if( e.feverSet ) {
+                                                    hitPlayer->fever = e.fever;
+                                                    }
+
+
+                                                playerIndicesToSendUpdatesAbout.
+                                                    push_back( 
+                                                        getLiveObjectIndex( 
+                                                            hitPlayer->id ) );
+                                                }   
+                                            }
                                         }
                                     
 
@@ -5925,9 +9677,22 @@ int main() {
                                         // leave bloody knife or
                                         // whatever in hand
                                         nextPlayer->holdingID = rHit->newActor;
+                                        holdingSomethingNew( nextPlayer,
+                                                             oldHolding);
+                                        }
+                                    else if( woundHit != NULL ) {
+                                        // result of hit on held weapon 
+                                        // could also be
+                                        // specified in wound trans
+                                        nextPlayer->holdingID = 
+                                            woundHit->newActor;
+                                        holdingSomethingNew( nextPlayer,
+                                                             oldHolding);
                                         }
                                     else if( r != NULL ) {
                                         nextPlayer->holdingID = r->newActor;
+                                        holdingSomethingNew( nextPlayer,
+                                                             oldHolding );
                                         }
 
 
@@ -5963,8 +9728,9 @@ int main() {
                                             else {
                                             
                                                 TransRecord *newDecayT = 
-                                                    getTrans( -1, 
-                                                              r->newTarget );
+                                                    getMetaTrans( 
+                                                        -1, 
+                                                        r->newTarget );
                     
                                                 if( newDecayT != NULL ) {
                                                     hitPlayer->
@@ -6011,6 +9777,14 @@ int main() {
                         // know that action is over)
                         playerIndicesToSendUpdatesAbout.push_back( i );
                         
+                        // track whether this USE resulted in something
+                        // new on the ground in case of placing a grave
+                        int newGroundObject = -1;
+                        GridPos newGroundObjectOrigin =
+                            { nextPlayer->heldGraveOriginX,
+                              nextPlayer->heldGraveOriginY };
+                        
+
                         char distanceUseAllowed = false;
                         
                         if( nextPlayer->holdingID > 0 ) {
@@ -6065,11 +9839,33 @@ int main() {
                             
                             int oldHolding = nextPlayer->holdingID;
                             
-                            if( target != 0 ) {                                
+                            char wrongSide = false;
+                            
+                            if( target != 0 &&
+                                isGridAdjacent( m.x, m.y,
+                                                nextPlayer->xd, 
+                                                nextPlayer->yd ) ) {
+                                ObjectRecord *targetObj = getObject( target );
+
+                                if( targetObj->sideAccess ) {
+                                    
+                                    if( m.y > nextPlayer->yd ||
+                                        m.y < nextPlayer->yd ) {
+                                        // access from N or S
+                                        wrongSide = true;
+                                        }
+                                    }
+                                }
+                            
+
+                            
+                            if( wrongSide ) {
+                                // ignore action from wrong side
+                                }
+                            else if( target != 0 ) {
                                 ObjectRecord *targetObj = getObject( target );
                                 
                                 // try using object on this target 
-                                char transApplied = false;
                                 
                                 TransRecord *r = NULL;
                                 char defaultTrans = false;
@@ -6109,6 +9905,17 @@ int main() {
                                             heldCanBeUsed = true;
                                             }
                                         }
+
+                                    if( r == NULL ) {
+                                        // no transition applies for this
+                                        // held, whether full or empty
+                                        
+                                        // let it be used anyway, so
+                                        // that generic transition (below)
+                                        // might apply
+                                        heldCanBeUsed = true;
+                                        }
+                                    
                                     r = NULL;
                                     }
                                 
@@ -6120,49 +9927,105 @@ int main() {
                                     // (and no bare hand action available)
                                     r = getPTrans( nextPlayer->holdingID,
                                                   target );
+                                    }
+                                
+                                if( r == NULL && 
+                                    ( nextPlayer->holdingID != 0 || 
+                                      targetObj->permanent ) ) {
                                     
-                                    transApplied = true;
-                                    
-                                    if( r == NULL && 
-                                        ( nextPlayer->holdingID > 0 || 
-                                          targetObj->permanent ) ) {
+                                    // search for default 
+                                    r = getPTrans( -2, target );
                                         
-                                        // search for default 
-                                        r = getPTrans( -2, target );
+                                    if( r != NULL ) {
+                                        defaultTrans = true;
+                                        }
+                                    else if( nextPlayer->holdingID <= 0 || 
+                                             targetObj->numSlots == 0 ) {
+                                        // also consider bare-hand
+                                        // action that produces
+                                        // no new held item
                                         
-                                        if( r != NULL ) {
+                                        // but only on non-container
+                                        // objects (example:  we don't
+                                        // want to kick minecart into
+                                        // motion every time we try
+                                        // to add something to it)
+                                        
+                                        // treat this the same as
+                                        // default
+                                        r = getPTrans( 0, target );
+                                        
+                                        if( r != NULL && 
+                                            r->newActor == 0 ) {
+                                            
                                             defaultTrans = true;
                                             }
-                                        }
-                                    
-                                    if( r == NULL && 
-                                        nextPlayer->holdingID > 0 ) {
-                                        
-                                        logTransitionFailure( 
-                                            nextPlayer->holdingID,
-                                            target );
+                                        else {
+                                            r = NULL;
+                                            }
                                         }
                                     }
                                 
+
+                                if( r != NULL &&
+                                    r->newTarget > 0 &&
+                                    r->newTarget != target ) {
+                                    
+                                    // target would change here
+                                    if( getMapFloor( m.x, m.y ) != 0 ) {
+                                        // floor present
+                                        
+                                        // make sure new target allowed 
+                                        // to exist on floor
+                                        if( strstr( getObject( r->newTarget )->
+                                                    description, 
+                                                    "groundOnly" ) != NULL ) {
+                                            r = NULL;
+                                            }
+                                        }
+                                    }
+                                
+
+                                if( r == NULL && 
+                                    nextPlayer->holdingID > 0 ) {
+                                    
+                                    logTransitionFailure( 
+                                        nextPlayer->holdingID,
+                                        target );
+                                    }
+                                
+                                double playerAge = computeAge( nextPlayer );
+                                
+
                                 if( r != NULL && containmentTransfer ) {
                                     // special case contained items
                                     // moving from actor into new target
                                     // (and hand left empty)
                                     setResponsiblePlayer( - nextPlayer->id );
+                                    
                                     setMapObject( m.x, m.y, r->newTarget );
+                                    newGroundObject = r->newTarget;
+                                    
                                     setResponsiblePlayer( -1 );
                                     
                                     transferHeldContainedToMap( nextPlayer,
                                                                 m.x, m.y );
                                     handleHoldingChange( nextPlayer,
                                                          r->newActor );
+
+                                    nextPlayer->heldGraveOriginX = m.x;
+                                    nextPlayer->heldGraveOriginY = m.y;
                                     }
                                 else if( r != NULL &&
                                     // are we old enough to handle
                                     // what we'd get out of this transition?
-                                    ( r->newActor == 0 || 
-                                      getObject( r->newActor )->minPickupAge <= 
-                                      computeAge( nextPlayer ) ) 
+                                    ( ( r->newActor == 0 &&
+                                        playerAge >= defaultActionAge )
+                                      || 
+                                      ( r->newActor > 0 &&
+                                        getObject( r->newActor )->minPickupAge 
+                                        <= 
+                                        playerAge ) ) 
                                     &&
                                     // does this create a blocking object?
                                     // only consider vertical-blocking
@@ -6191,7 +10054,9 @@ int main() {
                                     if( ! defaultTrans ) {    
                                         handleHoldingChange( nextPlayer,
                                                              r->newActor );
-                                        
+                                        nextPlayer->heldGraveOriginX = m.x;
+                                        nextPlayer->heldGraveOriginY = m.y;
+                                    
                                         if( r->target > 0 ) {    
                                             nextPlayer->heldTransitionSourceID =
                                                 r->target;
@@ -6276,6 +10141,7 @@ int main() {
                                         }
                                     else {    
                                         setMapObject( m.x, m.y, r->newTarget );
+                                        newGroundObject = r->newTarget;
                                         }
                                     
                                     
@@ -6303,28 +10169,9 @@ int main() {
                                     // this non-permanent target object
                                     
                                     // treat it like pick up
-                                    transApplied = true;
                                     
-                                    nextPlayer->holdingEtaDecay = 
-                                        getEtaDecay( m.x, m.y );
-                                    
-                                    FullMapContained f =
-                                        getFullMapContained( m.x, m.y );
-
-                                    setContained( nextPlayer, f );
-                                    
-                                    clearAllContained( m.x, m.y );
-                                    
-                                    setResponsiblePlayer( - nextPlayer->id );
-                                    setMapObject( m.x, m.y, 0 );
-                                    setResponsiblePlayer( -1 );
-                                    
-                                    nextPlayer->holdingID = target;
-                                    
-                                    nextPlayer->heldOriginValid = 1;
-                                    nextPlayer->heldOriginX = m.x;
-                                    nextPlayer->heldOriginY = m.y;
-                                    nextPlayer->heldTransitionSourceID = -1;
+                                    pickupToHold( nextPlayer, m.x, m.y,
+                                                  target );
                                     }
                                 else if( nextPlayer->holdingID == 0 &&
                                          targetObj->permanent ) {
@@ -6339,7 +10186,7 @@ int main() {
                                     // try adding what we're holding to
                                     // target container
                                     
-                                    transApplied = addHeldToContainer(
+                                    addHeldToContainer(
                                         nextPlayer, target, m.x, m.y );
                                     }
                                 
@@ -6349,6 +10196,10 @@ int main() {
                                     
                                     // just touching this object
                                     // causes us to eat from it
+                                    
+                                    nextPlayer->justAte = true;
+                                    nextPlayer->justAteID = 
+                                        targetObj->id;
 
                                     nextPlayer->lastAteID = 
                                         targetObj->id;
@@ -6358,6 +10209,9 @@ int main() {
                                     nextPlayer->foodStore += 
                                         targetObj->foodValue;
                                     
+                                    updateYum( nextPlayer, targetObj->id );
+                                    
+
                                     logEating( targetObj->id,
                                                targetObj->foodValue,
                                                computeAge( nextPlayer ),
@@ -6404,50 +10258,6 @@ int main() {
                                     
                                     nextPlayer->foodUpdate = true;
                                     }
-                                
-
-                                if( ! transApplied &&
-                                    nextPlayer->holdingID != 0 ) {
-                                    // no transition for what we're
-                                    // holding on target
-
-                                    // check if surrounded
-
-                                    int nA = 
-                                        getMapObject( nextPlayer->xd - 1, 
-                                                      nextPlayer->yd );
-                                    int nB = 
-                                        getMapObject( nextPlayer->xd + 1, 
-                                                      nextPlayer->yd );
-                                    int nC = 
-                                        getMapObject( nextPlayer->xd, 
-                                                      nextPlayer->yd - 1 );
-                                    int nD = 
-                                        getMapObject( nextPlayer->xd, 
-                                                      nextPlayer->yd + 1 );
-                                    
-                                    if( nA != 0 && nB != 0 && 
-                                        nC != 0 && nD != 0 
-                                        &&
-                                        getObject( nA )->blocksWalking &&
-                                        getObject( nB )->blocksWalking &&
-                                        getObject( nC )->blocksWalking &&
-                                        getObject( nD )->blocksWalking ) {
-                                        
-
-                                        // surrounded with blocking
-                                        // objects while holding
-                                    
-                                        // throw held into nearest empty spot
-                                        
-                                        handleDrop( 
-                                            m.x, m.y, 
-                                            nextPlayer,
-                                            &playerIndicesToSendUpdatesAbout );
-                                        }
-                                    
-                                    // action doesn't happen, just the drop
-                                    }
                                 }
                             else if( nextPlayer->holdingID > 0 ) {
                                 // target location emtpy
@@ -6493,6 +10303,9 @@ int main() {
                                                 }
                                             handleHoldingChange( nextPlayer,
                                                                  r->newActor );
+                                            
+                                            nextPlayer->heldGraveOriginX = m.x;
+                                            nextPlayer->heldGraveOriginY = m.y;
                                             }
                                         else {
                                             // changing floor to non-floor
@@ -6512,7 +10325,11 @@ int main() {
                                                 handleHoldingChange( 
                                                     nextPlayer,
                                                     r->newActor );
-                                            
+                                                nextPlayer->
+                                                    heldGraveOriginX = m.x;
+                                                nextPlayer->
+                                                    heldGraveOriginY = m.y;
+                                    
                                                 usedOnFloor = true;
                                                 }
                                             }
@@ -6565,7 +10382,9 @@ int main() {
                                         }
                                     
                                     if( canPlace ) {
-
+                                        nextPlayer->heldTransitionSourceID =
+                                            nextPlayer->holdingID;
+                                        
                                         if( nextPlayer->numContained > 0 &&
                                             r->newActor == 0 &&
                                             r->newTarget > 0 &&
@@ -6582,8 +10401,11 @@ int main() {
 
                                             setResponsiblePlayer( 
                                                 - nextPlayer->id );
+
                                             setMapObject( m.x, m.y, 
                                                           r->newTarget );
+                                            newGroundObject = r->newTarget;
+
                                             setResponsiblePlayer( -1 );
                                     
                                             transferHeldContainedToMap( 
@@ -6591,11 +10413,17 @@ int main() {
                                             
                                             handleHoldingChange( nextPlayer,
                                                                  r->newActor );
+                                            
+                                            nextPlayer->heldGraveOriginX = m.x;
+                                            nextPlayer->heldGraveOriginY = m.y;
                                             }
                                         else {
                                             handleHoldingChange( nextPlayer,
                                                                  r->newActor );
-                                        
+                                            
+                                            nextPlayer->heldGraveOriginX = m.x;
+                                            nextPlayer->heldGraveOriginY = m.y;
+                                    
                                             setResponsiblePlayer( 
                                                 - nextPlayer->id );
                                             
@@ -6609,6 +10437,7 @@ int main() {
                                             else {    
                                                 setMapObject( m.x, m.y, 
                                                               r->newTarget );
+                                                newGroundObject = r->newTarget;
                                                 }
                                             
                                             setResponsiblePlayer( -1 );
@@ -6620,6 +10449,23 @@ int main() {
                                             }
                                         }
                                     }
+                                }
+                            }
+
+
+                        if( newGroundObject > 0 ) {
+
+                            ObjectRecord *o = getObject( newGroundObject );
+                            
+                            if( strstr( o->description, "origGrave" ) 
+                                != NULL ) {
+                                
+                                GraveMoveInfo g = { 
+                                    { newGroundObjectOrigin.x,
+                                      newGroundObjectOrigin.y },
+                                    { m.x,
+                                      m.y } };
+                                newGraveMoves.push_back( g );
                                 }
                             }
                         }
@@ -6655,7 +10501,8 @@ int main() {
 
                                 // is anyone there?
                                 LiveObject *hitPlayer = 
-                                    getHitPlayer( m.x, m.y, false, 5 );
+                                    getHitPlayer( m.x, m.y, m.id, 
+                                                  false, babyAge );
                                 
                                 if( hitPlayer != NULL &&
                                     !hitPlayer->heldByOther &&
@@ -6664,6 +10511,7 @@ int main() {
                                     // negative holding IDs to indicate
                                     // holding another player
                                     nextPlayer->holdingID = -hitPlayer->id;
+                                    holdingSomethingNew( nextPlayer );
                                     
                                     nextPlayer->holdingEtaDecay = 0;
 
@@ -6674,37 +10522,11 @@ int main() {
                                     // holding
 
                                     if( hitPlayer->holdingID != 0 ) {
-
-                                        if( hitPlayer->holdingWound &&
-                                            hitPlayer->embeddedWeaponID > 0 ) {
-                                            
-                                            // switch from wound to
-                                            // holding embedded weapon
-                                            // have them drop it when
-                                            // picked up
-                                            hitPlayer->holdingID = 
-                                                hitPlayer->
-                                                embeddedWeaponID;
-                                            hitPlayer->holdingEtaDecay =
-                                                hitPlayer->
-                                                embeddedWeaponEtaDecay;
-                                            
-                                            hitPlayer->embeddedWeaponID = 0;
-                                            hitPlayer->embeddedWeaponEtaDecay
-                                                = 0;
-                                            hitPlayer->holdingWound = false;
-                                            }
-                                        else if( hitPlayer->holdingWound &&
-                                                 hitPlayer->embeddedWeaponID 
-                                                 == 0 ) {
-                                            // holding wound only
-                                            // disappears
-                                            hitPlayer->holdingID = 0;
-                                            hitPlayer->holdingEtaDecay = 0;
-                                            }
-                                        
-
-                                        if( hitPlayer->holdingID > 0 ) {
+                                        // never drop held wounds
+                                        // they are the only thing a baby can
+                                        // while held
+                                        if( ! hitPlayer->holdingWound && 
+                                            hitPlayer->holdingID > 0 ) {
                                             handleDrop( 
                                                 m.x, m.y, hitPlayer,
                                              &playerIndicesToSendUpdatesAbout );
@@ -6750,6 +10572,25 @@ int main() {
                                         // food
                                         int nurseCost = 1;
                                         
+                                        if( nextPlayer->yummyBonusStore > 0 ) {
+                                            nextPlayer->yummyBonusStore -= 
+                                                nurseCost;
+                                            nurseCost = 0;
+                                            if( nextPlayer->yummyBonusStore < 
+                                                0 ) {
+                                                
+                                                // not enough to cover full 
+                                                // nurse cost
+
+                                                // pass remaining nurse
+                                                // cost onto main food store
+                                                nurseCost = - nextPlayer->
+                                                    yummyBonusStore;
+                                                nextPlayer->yummyBonusStore = 0;
+                                                }
+                                            }
+                                        
+
                                         nextPlayer->foodStore -= nurseCost;
                                         
                                         if( nextPlayer->foodStore < 0 ) {
@@ -6828,8 +10669,9 @@ int main() {
                                 // try click on baby
                                 int hitIndex;
                                 LiveObject *hitPlayer = 
-                                    getHitPlayer( m.x, m.y, 
-                                                  false, 5, -1, &hitIndex );
+                                    getHitPlayer( m.x, m.y, m.id,
+                                                  false, 
+                                                  babyAge, -1, &hitIndex );
                                 
                                 if( hitPlayer != NULL && holdingDrugs ) {
                                     // can't even feed baby drugs
@@ -6841,7 +10683,8 @@ int main() {
                                     hitPlayer == nextPlayer ) {
                                     // try click on elderly
                                     hitPlayer = 
-                                        getHitPlayer( m.x, m.y, false, -1, 
+                                        getHitPlayer( m.x, m.y, m.id,
+                                                      false, -1, 
                                                       55, &hitIndex );
                                     }
                                 
@@ -6853,8 +10696,26 @@ int main() {
                                     // feeding action 
                                     // try click on everyone
                                     hitPlayer = 
-                                        getHitPlayer( m.x, m.y, false, -1, -1, 
+                                        getHitPlayer( m.x, m.y, m.id,
+                                                      false, -1, -1, 
                                                       &hitIndex );
+                                    }
+                                
+                                
+                                if( ( hitPlayer == NULL ||
+                                      hitPlayer == nextPlayer )
+                                    &&
+                                    ! holdingDrugs ) {
+                                    
+                                    // see if clicked-on player is dying
+                                    hitPlayer = 
+                                        getHitPlayer( m.x, m.y, m.id,
+                                                      false, -1, -1, 
+                                                      &hitIndex );
+                                    if( hitPlayer != NULL &&
+                                        ! hitPlayer->dying ) {
+                                        hitPlayer = NULL;
+                                        }
                                     }
                                 
 
@@ -6880,14 +10741,118 @@ int main() {
                             nextPlayer->actionTarget.x = m.x;
                             nextPlayer->actionTarget.y = m.y;
                             
-                            if( nextPlayer->holdingID > 0 ) {
+
+                            if( targetPlayer != nextPlayer &&
+                                targetPlayer->dying &&
+                                ! holdingFood ) {
+                                
+                                // try healing wound
+                                    
+                                TransRecord *healTrans =
+                                    getMetaTrans( nextPlayer->holdingID,
+                                                  targetPlayer->holdingID );
+                                
+                                char oldEnough = true;
+
+                                if( healTrans != NULL ) {
+                                    int healerWillHold = healTrans->newActor;
+                                    
+                                    if( healerWillHold > 0 ) {
+                                        if( computeAge( nextPlayer ) < 
+                                            getObject( healerWillHold )->
+                                            minPickupAge ) {
+                                            oldEnough = false;
+                                            }
+                                        }
+                                    }
+                                
+
+                                if( oldEnough && healTrans != NULL ) {
+                                    targetPlayer->holdingID =
+                                        healTrans->newTarget;
+                                    holdingSomethingNew( targetPlayer );
+                                    
+                                    // their wound has been changed
+                                    // no longer track embedded weapon
+                                    targetPlayer->embeddedWeaponID = 0;
+                                    targetPlayer->embeddedWeaponEtaDecay = 0;
+                                    
+                                    
+                                    nextPlayer->holdingID = 
+                                        healTrans->newActor;
+                                    holdingSomethingNew( nextPlayer );
+                                    
+                                    setFreshEtaDecayForHeld( 
+                                        nextPlayer );
+                                    setFreshEtaDecayForHeld( 
+                                        targetPlayer );
+                                    
+                                    nextPlayer->heldOriginValid = 0;
+                                    nextPlayer->heldOriginX = 0;
+                                    nextPlayer->heldOriginY = 0;
+                                    nextPlayer->heldTransitionSourceID = 
+                                        healTrans->target;
+                                    
+                                    targetPlayer->heldOriginValid = 0;
+                                    targetPlayer->heldOriginX = 0;
+                                    targetPlayer->heldOriginY = 0;
+                                    targetPlayer->heldTransitionSourceID = 
+                                        -1;
+                                    
+                                    if( targetPlayer->holdingID == 0 ) {
+                                        // not dying anymore
+                                        setNoLongerDying( 
+                                            targetPlayer,
+                                            &playerIndicesToSendHealingAbout );
+                                        }
+                                    else {
+                                        // wound changed?
+
+                                        ForcedEffects e = 
+                                            checkForForcedEffects( 
+                                                targetPlayer->holdingID );
+                            
+                                        if( e.emotIndex != -1 ) {
+                                            targetPlayer->emotFrozen = true;
+                                            newEmotPlayerIDs.push_back( 
+                                                targetPlayer->id );
+                                            newEmotIndices.push_back( 
+                                                e.emotIndex );
+                                            newEmotTTLs.push_back( e.ttlSec );
+                                            }
+                                        if( e.foodCapModifier != 1 ) {
+                                            targetPlayer->foodCapModifier = 
+                                                e.foodCapModifier;
+                                            targetPlayer->foodUpdate = true;
+                                            }
+                                        if( e.feverSet ) {
+                                            targetPlayer->fever = e.fever;
+                                            }
+                                        }
+                                    }
+                                }
+                            else if( nextPlayer->holdingID > 0 ) {
                                 ObjectRecord *obj = 
                                     getObject( nextPlayer->holdingID );
                                 
                                 int cap = computeFoodCapacity( targetPlayer );
                                 
-                                if( obj->foodValue > 0 && 
-                                    targetPlayer->foodStore < cap ) {
+
+                                // first case:
+                                // player clicked on clothing
+                                // try adding held into clothing, but if
+                                // that fails go on to other cases
+                                if( targetPlayer == nextPlayer &&
+                                    m.i >= 0 && 
+                                    m.i < NUM_CLOTHING_PIECES &&
+                                    addHeldToClothingContainer( nextPlayer,
+                                                                m.i ) ) {
+                                    // worked!
+                                    }
+                                // next case, holding food
+                                // that couldn't be put into clicked clothing
+                                else if( obj->foodValue > 0 && 
+                                         targetPlayer->foodStore < cap ) {
                                     
                                     targetPlayer->justAte = true;
                                     targetPlayer->justAteID = 
@@ -6900,6 +10865,8 @@ int main() {
                                     
                                     targetPlayer->foodStore += obj->foodValue;
                                     
+                                    updateYum( targetPlayer, obj->id );
+
                                     logEating( obj->id,
                                                obj->foodValue,
                                                computeAge( targetPlayer ),
@@ -6926,7 +10893,9 @@ int main() {
                                     if( r != NULL ) {
                                         int oldHolding = nextPlayer->holdingID;
                                         nextPlayer->holdingID = r->newActor;
-                                        
+                                        holdingSomethingNew( nextPlayer,
+                                                             oldHolding );
+
                                         if( oldHolding !=
                                             nextPlayer->holdingID ) {
                                             
@@ -6947,8 +10916,15 @@ int main() {
                                     
                                     targetPlayer->foodUpdate = true;
                                     }
-                                else if( obj->clothing != 'n' ) {
-                                    // wearable
+                                // final case, holding clothing that
+                                // we could put on
+                                else if( obj->clothing != 'n' &&
+                                         ( targetPlayer == nextPlayer
+                                           || 
+                                           computeAge( targetPlayer ) < 
+                                           babyAge) ) {
+                                    
+                                    // wearable, dress self or baby
                                     
                                     nextPlayer->holdingID = 0;
                                     timeSec_t oldEtaDecay = 
@@ -7084,11 +11060,17 @@ int main() {
                                         if( oldC != NULL ) {
                                             nextPlayer->holdingID =
                                                 oldC->id;
+                                            holdingSomethingNew( nextPlayer );
+                                            
                                             nextPlayer->holdingEtaDecay
                                                 = oldCEtaDecay;
                                             
                                             nextPlayer->numContained =
                                                 oldNumContained;
+                                            
+                                            freePlayerContainedArrays(
+                                                nextPlayer );
+                                            
                                             nextPlayer->containedIDs =
                                                 oldContainedIDs;
                                             nextPlayer->containedEtaDecays =
@@ -7105,15 +11087,6 @@ int main() {
                                                     nextPlayer->numContained ];
                                             }
                                         }
-                                    }
-                                else if( targetPlayer == nextPlayer &&
-                                         m.i >= 0 && 
-                                         m.i < NUM_CLOTHING_PIECES ) {
-                                    // not wearable or food
-                                    // try dropping what we're holding
-                                    // into clothing
-                                    addHeldToClothingContainer( nextPlayer,
-                                                                m.i );
                                     }
                                 }         
                             else {
@@ -7171,6 +11144,8 @@ int main() {
                                     
                                     nextPlayer->holdingID =
                                         ( *clothingSlot )->id;
+                                    holdingSomethingNew( nextPlayer );
+
                                     *clothingSlot = NULL;
                                     nextPlayer->holdingEtaDecay =
                                         targetPlayer->clothingEtaDecay[ind];
@@ -7179,6 +11154,8 @@ int main() {
                                     nextPlayer->numContained =
                                         targetPlayer->
                                         clothingContained[ind].size();
+                                    
+                                    freePlayerContainedArrays( nextPlayer );
                                     
                                     nextPlayer->containedIDs =
                                         targetPlayer->
@@ -7228,9 +11205,7 @@ int main() {
                             canDrop = false;
                             }
 
-                        if( canDrop 
-                            &&
-                            ( isGridAdjacent( m.x, m.y,
+                        if( ( isGridAdjacent( m.x, m.y,
                                               nextPlayer->xd, 
                                               nextPlayer->yd ) 
                               ||
@@ -7263,7 +11238,8 @@ int main() {
                                             &playerIndicesToSendUpdatesAbout );
                                         }    
                                     }
-                                else if( isMapSpotEmpty( m.x, m.y ) ) {
+                                else if( canDrop && 
+                                         isMapSpotEmpty( m.x, m.y ) ) {
                                 
                                     // empty spot to drop non-baby into
                                     
@@ -7271,14 +11247,47 @@ int main() {
                                         m.x, m.y, nextPlayer,
                                         &playerIndicesToSendUpdatesAbout );
                                     }
-                                else if( m.c >= 0 && 
+                                else if( canDrop &&
+                                         m.c >= 0 && 
                                          m.c < NUM_CLOTHING_PIECES &&
                                          m.x == nextPlayer->xd &&
                                          m.y == nextPlayer->yd  &&
                                          nextPlayer->holdingID > 0 ) {
                                     
+                                    // drop into clothing indicates right-click
+                                    // so swap
+                                    
+                                    int oldHeld = nextPlayer->holdingID;
+                                    
+                                    // first add to top of container
+                                    // if possible
                                     addHeldToClothingContainer( nextPlayer,
                                                                 m.c );
+                                    if( nextPlayer->holdingID == 0 ) {
+                                        // add to top worked
+
+                                        // now take off bottom to hold
+                                        // but keep looking to find something
+                                        // different than what we were
+                                        // holding before
+                                        for( int s=0; 
+                                             s < nextPlayer->
+                                                 clothingContained[m.c].size() 
+                                                 - 1;
+                                             s++ ) {
+                                            
+                                            if( nextPlayer->
+                                                 clothingContained[m.c].
+                                                getElementDirect( s ) != 
+                                                oldHeld ) {
+                                                
+                                              removeFromClothingContainerToHold(
+                                                    nextPlayer, m.c, s );
+                                                break;
+                                                }
+                                            }
+                                        }
+                                    
                                     }
                                 else if( nextPlayer->holdingID > 0 ) {
                                     // non-baby drop
@@ -7294,6 +11303,69 @@ int main() {
                                         ObjectRecord *targetObj =
                                             getObject( target );
                                         
+
+                                        if( !canDrop ) {
+                                            // user may have a permanent object
+                                            // stuck in their hand with no place
+                                            // to drop it
+                                            
+                                            // need to check if 
+                                            // a use-on-bare-ground
+                                            // transition applies.  If so, we
+                                            // can treat it like a swap
+
+                                    
+                                            if( ! targetObj->permanent ) {
+                                                // target can be picked up
+
+                                                // "set-down" type bare ground 
+                                                // trans exists?
+                                                TransRecord
+                                                *r = getPTrans( 
+                                                    nextPlayer->holdingID, 
+                                                    -1 );
+
+                                                if( r != NULL && 
+                                                    r->newActor == 0 &&
+                                                    r->newTarget > 0 ) {
+                                            
+                                                    // only applies if the 
+                                                    // bare-ground
+                                                    // trans leaves nothing in
+                                                    // our hand
+                                            
+                                                    // first, change what they
+                                                    // are holding to this 
+                                                    // newTarget
+                                                    handleHoldingChange( 
+                                                        nextPlayer,
+                                                        r->newTarget );
+                                            
+                                                    // this will handle 
+                                                    // container
+                                                    // size changes, etc.
+                                                    // This is what should 
+                                                    // end up
+                                                    // on the ground
+                                                    // as the result
+                                                    // of the use-on-bare-ground
+                                                    // transition.
+
+                                                    // now swap it with the 
+                                                    // non-permanent object
+                                                    // on the ground.
+
+                                                    swapHeldWithGround( 
+                                                        nextPlayer,
+                                                        target,
+                                                        m.x,
+                                                        m.y,
+                                            &playerIndicesToSendUpdatesAbout );
+                                                    }
+                                                }
+                                            }
+
+
                                         int targetSlots =
                                             targetObj->numSlots;
                                         
@@ -7306,7 +11378,8 @@ int main() {
                                         
                                         char canGoIn = false;
                                         
-                                        if( droppedObj->containable &&
+                                        if( canDrop &&
+                                            droppedObj->containable &&
                                             targetSlotSize >=
                                             droppedObj->containSize ) {
                                             canGoIn = true;
@@ -7317,14 +11390,43 @@ int main() {
                                         // DROP indicates they 
                                         // right-clicked on container
                                         // so use swap mode
-                                        if( canGoIn && 
+                                        if( canDrop && 
+                                            canGoIn && 
                                             addHeldToContainer( 
                                                 nextPlayer,
                                                 target,
                                                 m.x, m.y, true ) ) {
                                             // handled
                                             }
-                                        else if( ! canGoIn &&
+                                        else if( canDrop && 
+                                                 ! canGoIn &&
+                                                 targetObj->permanent &&
+                                                 nextPlayer->numContained 
+                                                 == 0 ) {
+                                            // try treating it like
+                                            // a USE action
+                                            
+                                            TransRecord *useTrans =
+                                                getPTrans( 
+                                                    nextPlayer->holdingID,
+                                                    target );
+                                            // handle simple case
+                                            // stacking containers
+                                            // client sends DROP for this
+                                            if( useTrans != NULL &&
+                                                useTrans->newActor == 0 ) {
+                                                
+                                                handleHoldingChange(
+                                                    nextPlayer,
+                                                    useTrans->newActor );
+                                                
+                                                setMapObject( 
+                                                    m.x, m.y,
+                                                    useTrans->newTarget );
+                                                }
+                                            }
+                                        else if( canDrop && 
+                                                 ! canGoIn &&
                                                  ! targetObj->permanent 
                                                  &&
                                                  targetObj->minPickupAge <=
@@ -7335,37 +11437,73 @@ int main() {
 
                                             // swap what we're holding for
                                             // target
-                                            
-                                            timeSec_t newHoldingEtaDecay = 
-                                                getEtaDecay( m.x, m.y );
 
-                                            FullMapContained f = 
-                                                getFullMapContained( m.x, m.y );
-                                            
+                                            // "set-down" type bare ground 
+                                            // trans exists for what we're 
+                                            // holding?
+                                            TransRecord
+                                                *r = getPTrans( 
+                                                    nextPlayer->holdingID, 
+                                                    -1 );
 
-                                            clearAllContained( m.x, m.y );
-                                            setMapObject( m.x, m.y, 0 );
-                                    
-                                            handleDrop(
-                                             m.x, m.y, nextPlayer,
+                                            if( r != NULL && 
+                                                r->newActor == 0 &&
+                                                r->newTarget > 0 ) {
+                                            
+                                                // only applies if the 
+                                                // bare-ground
+                                                // trans leaves nothing in
+                                                // our hand
+                                            
+                                                // first, change what they
+                                                // are holding to this 
+                                                // newTarget
+                                                handleHoldingChange( 
+                                                    nextPlayer,
+                                                    r->newTarget );
+                                                }
+                                            
+                                            int oldHeld = 
+                                                nextPlayer->holdingID;
+                                            
+                                            // now swap
+                                            swapHeldWithGround( 
+                                             nextPlayer, target, m.x, m.y,
                                              &playerIndicesToSendUpdatesAbout );
-                                    
                                             
-                                            nextPlayer->holdingID = target;
-                                            nextPlayer->holdingEtaDecay =
-                                                newHoldingEtaDecay;
-
-                                            setContained( nextPlayer, f );
-                                            
-                                    
-                                            nextPlayer->heldOriginValid = 1;
-                                            nextPlayer->heldOriginX = m.x;
-                                            nextPlayer->heldOriginY = m.y;
-                                            nextPlayer->heldTransitionSourceID =
-                                                -1;
+                                            if( oldHeld == 
+                                                nextPlayer->holdingID ) {
+                                                // no change
+                                                // are they the same object?
+                                                if( oldHeld == target ) {
+                                                    // try using held
+                                                    // on target
+                                                    TransRecord *sameTrans
+                                                        = getPTrans(
+                                                            oldHeld, target );
+                                                    if( sameTrans != NULL &&
+                                                        sameTrans->newActor ==
+                                                        0 ) {
+                                                        // keep it simple
+                                                        // for now
+                                                        // this is usually
+                                                        // just about
+                                                        // stacking
+                                                        handleHoldingChange(
+                                                            nextPlayer,
+                                                            sameTrans->
+                                                            newActor );
+                                                        
+                                                        setMapObject(
+                                                            m.x, m.y,
+                                                            sameTrans->
+                                                            newTarget );
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
-                                    else {
+                                    else if( canDrop ) {
                                         // no object here
                                         
                                         // maybe there's a person
@@ -7392,8 +11530,56 @@ int main() {
                         // know that action is over)
                         playerIndicesToSendUpdatesAbout.push_back( i );
                         
+                        char handEmpty = ( nextPlayer->holdingID == 0 );
+                        
                         removeFromContainerToHold( nextPlayer,
                                                    m.x, m.y, m.i );
+
+                        if( handEmpty &&
+                            nextPlayer->holdingID == 0 ) {
+                            // hand still empty?
+                            
+                            int target = getMapObject( m.x, m.y );
+
+                            if( target > 0 ) {
+                                ObjectRecord *targetObj = getObject( target );
+                                
+                                if( ! targetObj->permanent &&
+                                    targetObj->minPickupAge <= 
+                                    computeAge( nextPlayer ) ) {
+                                    
+                                    // treat it like pick up   
+                                    pickupToHold( nextPlayer, m.x, m.y, 
+                                                  target );
+                                    }
+                                else if( targetObj->permanent ) {
+                                    // consider bare-hand action
+                                    TransRecord *handTrans = getPTrans(
+                                        0, target );
+                                    
+                                    // handle only simplest case here
+                                    // (to avoid side-effects)
+                                    // REMV on container stack
+                                    // (make sure they have the same
+                                    //  use parent)
+                                    if( handTrans != NULL &&
+                                        handTrans->newTarget > 0 &&
+                                        getObject( handTrans->newTarget )->
+                                        numSlots == targetObj->numSlots &&
+                                        handTrans->newActor > 0 &&
+                                        getObject( handTrans->newActor )->
+                                        minPickupAge <= 
+                                        computeAge( nextPlayer ) ) {
+                                        
+                                        handleHoldingChange( 
+                                            nextPlayer,
+                                            handTrans->newActor );
+                                        setMapObject( m.x, m.y, 
+                                                      handTrans->newTarget );
+                                        }
+                                    }
+                                }
+                            }
                         }                        
                     else if( m.type == SREMV ) {
                         playerIndicesToSendUpdatesAbout.push_back( i );
@@ -7409,90 +11595,36 @@ int main() {
                             nextPlayer->actionTarget.y = m.y;
                             
                             if( m.c >= 0 && m.c < NUM_CLOTHING_PIECES ) {
-
-                                ObjectRecord *cObj = 
-                                    clothingByIndex( nextPlayer->clothing, 
-                                                     m.c );
-                                
-                                float stretch = 1.0f;
-                                
-                                if( cObj != NULL ) {
-                                    stretch = cObj->slotTimeStretch;
-                                    }
-
-                                int oldNumContained = 
-                                    nextPlayer->clothingContained[m.c].size();
-
-                                int slotToRemove = m.i;
-                                
-                                if( slotToRemove < 0 ) {
-                                    slotToRemove = oldNumContained - 1;
-                                    }
-                                
-                                int toRemoveID = -1;
-                                
-                                if( oldNumContained > 0 &&
-                                    oldNumContained > slotToRemove &&
-                                    slotToRemove >= 0 ) {
-                                    
-                                    toRemoveID = 
-                                        nextPlayer->clothingContained[m.c].
-                                        getElementDirect( slotToRemove );
-                                    }
-
-                                if( oldNumContained > 0 &&
-                                    oldNumContained > slotToRemove &&
-                                    slotToRemove >= 0 &&
-                                    // old enough to handle it
-                                    getObject( toRemoveID )->minPickupAge <= 
-                                    computeAge( nextPlayer ) ) {
-                                    
-
-                                    nextPlayer->holdingID = 
-                                        nextPlayer->clothingContained[m.c].
-                                        getElementDirect( slotToRemove );
-
-                                    nextPlayer->holdingEtaDecay = 
-                                        nextPlayer->
-                                        clothingContainedEtaDecays[m.c].
-                                        getElementDirect( slotToRemove );
-                                    
-                                    timeSec_t curTime = Time::timeSec();
-
-                                    if( nextPlayer->holdingEtaDecay != 0 ) {
-                                        
-                                        timeSec_t offset = 
-                                            nextPlayer->holdingEtaDecay
-                                            - curTime;
-                                        offset = offset * stretch;
-                                        nextPlayer->holdingEtaDecay =
-                                            curTime + offset;
-                                        }
-
-                                    nextPlayer->clothingContained[m.c].
-                                        deleteElement( slotToRemove );
-                                    nextPlayer->clothingContainedEtaDecays[m.c].
-                                        deleteElement( slotToRemove );
-
-                                    nextPlayer->heldOriginValid = 0;
-                                    nextPlayer->heldOriginX = 0;
-                                    nextPlayer->heldOriginY = 0;
-                                    nextPlayer->heldTransitionSourceID = -1;
-                                    }
+                                removeFromClothingContainerToHold(
+                                    nextPlayer, m.c, m.i );
                                 }
                             }
                         }
-                    
-                    if( m.numExtraPos > 0 ) {
-                        delete [] m.extraPos;
-                        }
-
-                    if( m.saidText != NULL ) {
-                        delete [] m.saidText;
-                        }
-                    if( m.bugText != NULL ) {
-                        delete [] m.bugText;
-                        }
+                    else if( m.type == EMOT && 
+                             ! nextPlayer->emotFrozen ) {
+                        // ignore new EMOT requres from player if emot
+                        // frozen
+                        
+                        if( m.i <= SettingsManager::getIntSetting( 
+                                "allowedEmotRange", 6 ) ) {
+                            newEmotPlayerIDs.push_back( nextPlayer->id );
+                            
+                            newEmotIndices.push_back( m.i );
+                            // player-requested emots have no specific TTL
+                            newEmotTTLs.push_back( 0 );
+                            }
+                        } 
+                    }
+                
+                if( m.numExtraPos > 0 ) {
+                    delete [] m.extraPos;
+                    }
+                
+                if( m.saidText != NULL ) {
+                    delete [] m.saidText;
+                    }
+                if( m.bugText != NULL ) {
+                    delete [] m.bugText;
                     }
                 }
             }
@@ -7514,6 +11646,29 @@ int main() {
                 curTime >= nextPlayer->dyingETA ) {
                 // finally died
                 nextPlayer->error = true;
+
+                
+                if( ! nextPlayer->isTutorial ) {
+                    logDeath( nextPlayer->id,
+                              nextPlayer->email,
+                              nextPlayer->isEve,
+                              computeAge( nextPlayer ),
+                              getSecondsPlayed( 
+                                  nextPlayer ),
+                              ! getFemale( nextPlayer ),
+                              nextPlayer->xd, nextPlayer->yd,
+                              players.size() - 1,
+                              false,
+                              nextPlayer->murderPerpID,
+                              nextPlayer->murderPerpEmail );
+                                            
+                    if( shutdownMode ) {
+                        handleShutdownDeath( 
+                            nextPlayer, nextPlayer->xd, nextPlayer->yd );
+                        }
+                    }
+                
+                nextPlayer->deathLogged = true;
                 }
             
 
@@ -7525,11 +11680,15 @@ int main() {
                 playerIndicesToSendUpdatesAbout.push_back( i );
                 playerIndicesToSendLineageAbout.push_back( i );
                 
+                
+                if( nextPlayer->curseStatus.curseLevel > 0 ) {
+                    playerIndicesToSendCursesAbout.push_back( i );
+                    }
+
                 nextPlayer->isNew = false;
                 
                 // force this PU to be sent to everyone
-                ChangePosition p = { 0, 0, true };
-                newUpdatesPos.push_back( p );
+                nextPlayer->updateGlobal = true;
                 }
             else if( nextPlayer->error && ! nextPlayer->deleteSent ) {
                 
@@ -7546,12 +11705,11 @@ int main() {
                                           &playerIndicesToSendUpdatesAbout );
                     }
                 
-                char *updateLine = getUpdateLine( nextPlayer, true );
 
-                newDeleteUpdates.appendElementString( updateLine );
+                newDeleteUpdates.push_back( 
+                    getUpdateRecord( nextPlayer, true ) );                
                 
-                delete [] updateLine;
-                
+
                 nextPlayer->isNew = false;
                 
                 nextPlayer->deleteSent = true;
@@ -7594,28 +11752,76 @@ int main() {
                     dropPos = 
                         computePartialMoveSpot( nextPlayer );
                     }
+                
+                // report to lineage server once here
+                double age = computeAge( nextPlayer );
+                
+                int killerID = -1;
+                if( nextPlayer->murderPerpID > 0 ) {
+                    killerID = nextPlayer->murderPerpID;
+                    }
+                else if( nextPlayer->deathSourceID > 0 ) {
+                    // include as negative of ID
+                    killerID = - nextPlayer->deathSourceID;
+                    }
+                else if( nextPlayer->suicide ) {
+                    // self id is killer
+                    killerID = nextPlayer->id;
+                    }
+                
+                
+                
+                char male = ! getFemale( nextPlayer );
+                
+                if( ! nextPlayer->isTutorial )
+                recordPlayerLineage( nextPlayer->email, 
+                                     age,
+                                     nextPlayer->id,
+                                     nextPlayer->parentID,
+                                     nextPlayer->displayID,
+                                     killerID,
+                                     nextPlayer->name,
+                                     nextPlayer->lastSay,
+                                     male );
+                
+                // don't use age here, because it unfairly gives Eve
+                // +14 years that she didn't actually live
+                // use true played years instead
+                double yearsLived = 
+                    getSecondsPlayed( nextPlayer ) * getAgeRate();
 
+                if( ! nextPlayer->isTutorial )
+                recordLineage( nextPlayer->email, 
+                               nextPlayer->lineageEveID,
+                               yearsLived, 
+                               // count true murder victims here, not suicide
+                               ( killerID > 0 && killerID != nextPlayer->id ),
+                               // killed other or committed SID suicide
+                               nextPlayer->everKilledAnyone || 
+                               nextPlayer->suicide );
+        
                 if( ! nextPlayer->deathLogged ) {
-                    double age = computeAge( nextPlayer );
-                    
                     char disconnect = true;
                     
                     if( age >= forceDeathAge ) {
                         disconnect = false;
                         }
                     
-                    logDeath( nextPlayer->id,
-                              nextPlayer->email,
-                              nextPlayer->isEve,
-                              computeAge( nextPlayer ),
-                              getSecondsPlayed( nextPlayer ),
-                              ! getFemale( nextPlayer ),
-                              dropPos.x, dropPos.y,
-                              players.size() - 1,
-                              disconnect );
+                    if( ! nextPlayer->isTutorial ) {    
+                        logDeath( nextPlayer->id,
+                                  nextPlayer->email,
+                                  nextPlayer->isEve,
+                                  age,
+                                  getSecondsPlayed( nextPlayer ),
+                                  male,
+                                  dropPos.x, dropPos.y,
+                                  players.size() - 1,
+                                  disconnect );
                     
-                    if( shutdownMode ) {
-                        handleShutdownDeath( nextPlayer, dropPos.x, dropPos.y );
+                        if( shutdownMode ) {
+                            handleShutdownDeath( 
+                                nextPlayer, dropPos.x, dropPos.y );
+                            }
                         }
                     
                     nextPlayer->deathLogged = true;
@@ -7630,68 +11836,79 @@ int main() {
                     }
                 nextPlayer->email = stringDuplicate( "email_cleared" );
 
+                int deathID = getRandomDeathMarker();
+                    
+                if( nextPlayer->customGraveID > -1 ) {
+                    deathID = nextPlayer->customGraveID;
+                    }
 
                 int oldObject = getMapObject( dropPos.x, dropPos.y );
                 
                 SimpleVector<int> oldContained;
                 SimpleVector<timeSec_t> oldContainedETADecay;
                 
-                int nX[4] = { -1, 1,  0, 0 };
-                int nY[4] = {  0, 0, -1, 1 };
-                
-                int n = 0;
-                GridPos centerDropPos = dropPos;
-                
-                while( oldObject != 0 && n <= 4 ) {
+                if( deathID != 0 ) {
                     
-                    if( isGrave( oldObject ) ) {
-                        int numContained;
-                        
-                        int *contained = getContained( dropPos.x, dropPos.y, 
-                                                       &numContained );
-                        
-                        timeSec_t *containedETA =
-                            getContainedEtaDecay( dropPos.x, dropPos.y, 
-                                                  &numContained );
-                        
-                        if( numContained > 0 ) {
-                            oldContained.appendArray( contained, numContained );
-                            
-                            oldContainedETADecay.appendArray(
-                                containedETA, numContained );
-
-                            delete [] contained;
-                            delete [] containedETA;
-                            }
-                        setMapObject( dropPos.x, dropPos.y,  0 );
-                        clearAllContained( dropPos.x, dropPos.y );
-                        oldObject = 0;
-                        }
-                    else {
-                        ObjectRecord *r = getObject( oldObject );
-                        
-                        if( r->numSlots == 0 && ! r->permanent 
-                            && ! r->rideable ) {
-                            
-                            oldContained.push_back( oldObject );
-                            oldContainedETADecay.push_back(
-                                getEtaDecay( dropPos.x, dropPos.y ) );
-                            
-                            setMapObject( dropPos.x, dropPos.y, 0 );
-                            oldObject = 0;
-                            }
-                        }
-
-                    oldObject = getMapObject( dropPos.x, dropPos.y );
+                
+                    int nX[4] = { -1, 1,  0, 0 };
+                    int nY[4] = {  0, 0, -1, 1 };
                     
-                    if( oldObject != 0 ) {
+                    int n = 0;
+                    GridPos centerDropPos = dropPos;
+                    
+                    while( oldObject != 0 && n <= 4 ) {
                         
-                        // try next neighbor
-                        dropPos.x = centerDropPos.x + nX[n];
-                        dropPos.y = centerDropPos.y + nY[n];
+                        // don't combine graves
+                        if( ! isGrave( oldObject ) ) {
+                            ObjectRecord *r = getObject( oldObject );
+                            
+                            if( r->numSlots == 0 && ! r->permanent 
+                                && ! r->rideable ) {
+                                
+                                // found a containble object
+                                // we can empty this spot to make room
+                                // for a grave that can go here, and
+                                // put the old object into the new grave.
+                                
+                                oldContained.push_back( oldObject );
+                                oldContainedETADecay.push_back(
+                                    getEtaDecay( dropPos.x, dropPos.y ) );
+                                
+                                setMapObject( dropPos.x, dropPos.y, 0 );
+                                oldObject = 0;
+                                }
+                            }
                         
-                        n++;
                         oldObject = getMapObject( dropPos.x, dropPos.y );
+                        
+                        if( oldObject != 0 ) {
+                            
+                            // try next neighbor
+                            dropPos.x = centerDropPos.x + nX[n];
+                            dropPos.y = centerDropPos.y + nY[n];
+                            
+                            n++;
+                            oldObject = getMapObject( dropPos.x, dropPos.y );
+                            }
+                        }
+                    }
+                
+
+                if( ! isMapSpotEmpty( dropPos.x, dropPos.y, false ) ) {
+                    
+                    // failed to find an empty spot, or a containable object
+                    // at center or four neighbors
+                    
+                    // search outward in spiral of up to 100 points
+                    // look for some empty spot
+                    
+                    char foundEmpty = false;
+                    
+                    GridPos newDropPos = findClosestEmptyMapSpot(
+                        dropPos.x, dropPos.y, 100, &foundEmpty );
+                    
+                    if( foundEmpty ) {
+                        dropPos = newDropPos;
                         }
                     }
 
@@ -7699,11 +11916,6 @@ int main() {
                 // assume death markes non-blocking, so it's safe
                 // to drop one even if other players standing here
                 if( isMapSpotEmpty( dropPos.x, dropPos.y, false ) ) {
-                    int deathID = getRandomDeathMarker();
-                    
-                    if( nextPlayer->customGraveID > 0 ) {
-                        deathID = nextPlayer->customGraveID;
-                        }
 
                     if( deathID > 0 ) {
                         
@@ -7712,6 +11924,10 @@ int main() {
                                       deathID );
                         setResponsiblePlayer( -1 );
                         
+                        GraveInfo graveInfo = { dropPos, nextPlayer->id };
+                        newGraves.push_back( graveInfo );
+                        
+
                         ObjectRecord *deathObject = getObject( deathID );
                         
                         int roomLeft = deathObject->numSlots;
@@ -7867,6 +12083,12 @@ int main() {
                                 }
                             }
                         }
+                    if( nextPlayer->holdingWound ) {
+                        // holding a wound from some other, non-murder cause
+                        // of death
+                        doNotDrop = true;
+                        }
+                    
                     
                     if( ! doNotDrop ) {
                         // drop what they were holding
@@ -7899,84 +12121,21 @@ int main() {
                     if( t != NULL ) {
 
                         int newID = t->newTarget;
-                    
-                        int oldSlots = nextPlayer->numContained;
                         
-                        int newSlots = getNumContainerSlots( newID );
-                    
-                        if( newSlots < oldSlots ) {
-                            // new container can hold less
-                            // truncate
+                        handleHoldingChange( nextPlayer, newID );
+                        
+                        if( newID == 0 &&
+                            nextPlayer->holdingWound &&
+                            nextPlayer->dying ) {
                             
-                            GridPos dropPos = 
-                                computePartialMoveSpot( nextPlayer );
-                            
-                            // offset to counter-act offsets built into
-                            // drop code
-                            dropPos.x += 1;
-                            dropPos.y += 1;
-
-                            char found = false;
-                            GridPos spot;
-                            
-                            if( getMapObject( dropPos.x, dropPos.y ) == 0 ) {
-                                spot = dropPos;
-                                found = true;
-                                }
-                            else {
-                                found = findDropSpot( 
-                                    dropPos.x, dropPos.y,
-                                    dropPos.x, dropPos.y,
-                                    &spot );
-                                }
-                            
-                            
-                            if( found ) {
-                                
-                                // throw it on map temporarily
-                                handleDrop( 
-                                    spot.x, spot.y, 
-                                    nextPlayer,
-                                    &playerIndicesToSendUpdatesAbout );
-                                
-                                
-                                // shrink contianer on map
-                                shrinkContainer( spot.x, spot.y, 
-                                                 newSlots );
-
-                                // pick it back up
-                                nextPlayer->holdingEtaDecay = 
-                                    getEtaDecay( spot.x, spot.y );
-                                    
-                                FullMapContained f =
-                                    getFullMapContained( spot.x, spot.y );
-
-                                setContained( nextPlayer, f );
-                                
-                                clearAllContained( spot.x, spot.y );
-                                setMapObject( spot.x, spot.y, 0 );
-                                }
-                            else {
-                                // no spot to throw it
-                                // cannot leverage map's container-shrinking
-                                // just truncate held container directly
-                                
-                                // truncated contained items will be lost
-                                nextPlayer->numContained = newSlots;
-                                }
+                            // wound decayed naturally, count as healed
+                            setNoLongerDying( 
+                                nextPlayer,
+                                &playerIndicesToSendHealingAbout );            
                             }
                         
-                        nextPlayer->holdingID = newID;
+
                         nextPlayer->heldTransitionSourceID = -1;
-                    
-                        setFreshEtaDecayForHeld( nextPlayer );
-                    
-                        if( nextPlayer->numContained > 0 ) {    
-                            restretchDecays( nextPlayer->numContained,
-                                             nextPlayer->containedEtaDecays,
-                                             oldID, newID );
-                            }
-                    
                         
                         ObjectRecord *newObj = getObject( newID );
                         ObjectRecord *oldObj = getObject( oldID );
@@ -7987,7 +12146,7 @@ int main() {
                             // object decayed into a permanent
                             // force drop
                              GridPos dropPos = 
-                                computePartialMoveSpot( nextPlayer );
+                                getPlayerPos( nextPlayer );
                             
                              handleDrop( 
                                     dropPos.x, dropPos.y, 
@@ -8048,7 +12207,7 @@ int main() {
                                         slotTimeStretch;
                                     
                                     TransRecord *newDecayT = 
-                                        getTrans( -1, newID );
+                                        getMetaTrans( -1, newID );
                                 
                                     if( newDecayT != NULL ) {
                                         newDecay = 
@@ -8113,7 +12272,7 @@ int main() {
                                             slotTimeStretch;
                                     
                                         TransRecord *newSubDecayT = 
-                                            getTrans( -1, newSubID );
+                                            getMetaTrans( -1, newSubID );
                                 
                                         if( newSubDecayT != NULL ) {
                                             newSubDecay = 
@@ -8153,10 +12312,7 @@ int main() {
                     if( change ) {
                         playerIndicesToSendUpdatesAbout.push_back( i );
                         
-                        delete [] nextPlayer->containedIDs;
-                        delete [] nextPlayer->containedEtaDecays;
-                        delete [] nextPlayer->subContainedIDs;
-                        delete [] nextPlayer->subContainedEtaDecays;
+                        freePlayerContainedArrays( nextPlayer );
                         
                         nextPlayer->numContained = newContained.size();
 
@@ -8206,7 +12362,8 @@ int main() {
                             if( newID != 0 ) {
                                 newCObj = getObject( newID );
                                 
-                                TransRecord *newDecayT = getTrans( -1, newID );
+                                TransRecord *newDecayT = 
+                                    getMetaTrans( -1, newID );
                                 
                                 if( newDecayT != NULL ) {
                                     nextPlayer->clothingEtaDecay[c] = 
@@ -8239,7 +12396,7 @@ int main() {
                                 float stretch = cObj->slotTimeStretch;
                                 
                                 GridPos dropPos = 
-                                    computePartialMoveSpot( nextPlayer );
+                                    getPlayerPos( nextPlayer );
                             
                                 // offset to counter-act offsets built into
                                 // drop code
@@ -8384,7 +12541,7 @@ int main() {
                             
                                     if( newID != 0 ) {
                                         TransRecord *newDecayT = 
-                                            getTrans( -1, newID );
+                                            getMetaTrans( -1, newID );
                                         
                                         if( newDecayT != NULL ) {
                                             newDecay = 
@@ -8433,15 +12590,23 @@ int main() {
                     nextPlayer->yd != nextPlayer->ys ) {
                 
                     
-                    if( Time::getCurrentTime() - nextPlayer->moveStartTime
+                    // don't end new moves here (moves that 
+                    // other players haven't been told about)
+                    // even if they have come to an end time-wise
+                    // wait until after we've told everyone about them
+                    if( ! nextPlayer->newMove && 
+                        Time::getCurrentTime() - nextPlayer->moveStartTime
                         >
                         nextPlayer->moveTotalSeconds ) {
                         
+                        double moveSpeed = computeMoveSpeed( nextPlayer ) *
+                            getPathSpeedModifier( nextPlayer->pathToDest,
+                                                  nextPlayer->pathLength );
+
+
                         // done
                         nextPlayer->xs = nextPlayer->xd;
-                        nextPlayer->ys = nextPlayer->yd;
-                        nextPlayer->newMove = false;
-                        
+                        nextPlayer->ys = nextPlayer->yd;                        
 
                         printf( "Player %d's move is done at %d,%d\n",
                                 nextPlayer->id,
@@ -8454,6 +12619,152 @@ int main() {
                             nextPlayer->posForced = true;
                             }
                         playerIndicesToSendUpdatesAbout.push_back( i );
+
+                        
+                        // if they went far enough and fast enough
+                        if( nextPlayer->holdingFlightObject &&
+                            moveSpeed >= minFlightSpeed &&
+                            ! nextPlayer->pathTruncated &&
+                            nextPlayer->pathLength >= 2 ) {
+                                    
+                            // player takes off ?
+                            
+                            double xDir = 
+                                nextPlayer->pathToDest[ 
+                                      nextPlayer->pathLength - 1 ].x
+                                  -
+                                  nextPlayer->pathToDest[ 
+                                      nextPlayer->pathLength - 2 ].x;
+                            double yDir = 
+                                nextPlayer->pathToDest[ 
+                                      nextPlayer->pathLength - 1 ].y
+                                  -
+                                  nextPlayer->pathToDest[ 
+                                      nextPlayer->pathLength - 2 ].y;
+                            
+                            int beyondEndX = nextPlayer->xs + xDir;
+                            int beyondEndY = nextPlayer->ys + yDir;
+                            
+                            int endFloorID = getMapFloor( nextPlayer->xs,
+                                                          nextPlayer->ys );
+                            
+                            int beyondEndFloorID = getMapFloor( beyondEndX,
+                                                                beyondEndY );
+                            
+                            if( beyondEndFloorID != endFloorID ) {
+                                // went all the way to the end of the 
+                                // current floor in this direction, 
+                                // take off there
+                            
+                                doublePair takeOffDir = { xDir, yDir };
+
+                                GridPos destPos = 
+                                    getNextFlightLandingPos(
+                                        nextPlayer->xs,
+                                        nextPlayer->ys,
+                                        takeOffDir );
+                            
+                                AppLog::infoF( 
+                                    "Player %d flight taking off from (%d,%d), "
+                                    "flightDir (%f,%f), dest (%d,%d)",
+                                    nextPlayer->id,
+                                    nextPlayer->xs, nextPlayer->ys,
+                                    xDir, yDir,
+                                    destPos.x, destPos.y );
+                                
+                                
+                            
+                                // send them a brand new map chunk
+                                // around their new location
+                                // and re-tell them about all players
+                                // (relative to their new "birth" location...
+                                //  see below)
+                                nextPlayer->firstMessageSent = false;
+                                nextPlayer->firstMapSent = false;
+                                nextPlayer->inFlight = true;
+                                
+                                int destID = getMapObject( destPos.x,
+                                                           destPos.y );
+                                    
+                                char heldTransHappened = false;
+                                    
+                                if( destID > 0 &&
+                                    getObject( destID )->isFlightLanding ) {
+                                    // found a landing place
+                                    TransRecord *tr =
+                                        getPTrans( nextPlayer->holdingID,
+                                                   destID );
+                                        
+                                    if( tr != NULL ) {
+                                        heldTransHappened = true;
+                                            
+                                        setMapObject( destPos.x, destPos.y,
+                                                      tr->newTarget );
+
+                                        transferHeldContainedToMap( 
+                                            nextPlayer,
+                                            destPos.x, destPos.y );
+
+                                        handleHoldingChange(
+                                            nextPlayer,
+                                            tr->newActor );
+                                            
+                                        // stick player next to landing
+                                        // pad
+                                        destPos.x --;
+                                        }
+                                    }
+                                if( ! heldTransHappened ) {
+                                    // crash landing
+                                    // force decay of held
+                                    // no matter how much time is left
+                                    // (flight uses fuel)
+                                    TransRecord *decayTrans =
+                                        getPTrans( -1, 
+                                                   nextPlayer->holdingID );
+                                        
+                                    if( decayTrans != NULL ) {
+                                        handleHoldingChange( 
+                                            nextPlayer,
+                                            decayTrans->newTarget );
+                                        }
+                                    }
+                                    
+                                FlightDest fd = {
+                                    nextPlayer->id,
+                                    destPos };
+
+                                newFlightDest.push_back( fd );
+                                
+                                nextPlayer->xd = destPos.x;
+                                nextPlayer->xs = destPos.x;
+                                nextPlayer->yd = destPos.y;
+                                nextPlayer->ys = destPos.y;
+
+                                // reset their birth location
+                                // their landing position becomes their
+                                // new 0,0 for now
+                                
+                                // birth-relative coordinates enable the client
+                                // (which is on a GPU with 32-bit floats)
+                                // to operate at true coordinates well above
+                                // the 23-bit preciions of 32-bit floats.
+                                
+                                // We keep the coordinates small by assuming
+                                // that a player can never get too far from
+                                // their birth location in one lifetime.
+                                
+                                // Flight teleportation violates this 
+                                // assumption.
+                                nextPlayer->birthPos.x = nextPlayer->xs;
+                                nextPlayer->birthPos.y = nextPlayer->ys;
+                                nextPlayer->heldOriginX = nextPlayer->xs;
+                                nextPlayer->heldOriginY = nextPlayer->ys;
+                                
+                                nextPlayer->actionTarget.x = nextPlayer->xs;
+                                nextPlayer->actionTarget.y = nextPlayer->ys;
+                                }
+                            }
                         }
                     }
                 
@@ -8478,7 +12789,13 @@ int main() {
                     LiveObject *decrementedPlayer = NULL;
 
                     if( !heldByFemale ) {
-                        nextPlayer->foodStore --;
+
+                        if( nextPlayer->yummyBonusStore > 0 ) {
+                            nextPlayer->yummyBonusStore--;
+                            }
+                        else {
+                            nextPlayer->foodStore--;
+                            }
                         decrementedPlayer = nextPlayer;
                         }
                     // if held by fertile female, food for baby is free for
@@ -8527,17 +12844,21 @@ int main() {
                                 computePartialMoveSpot( decrementedPlayer );
                             }
                         
-                        logDeath( decrementedPlayer->id,
-                                  decrementedPlayer->email,
-                                  decrementedPlayer->isEve,
-                                  computeAge( decrementedPlayer ),
-                                  getSecondsPlayed( decrementedPlayer ),
-                                  ! getFemale( decrementedPlayer ),
-                                  deathPos.x, deathPos.y,
-                                  players.size() - 1,
-                                  false );
+                        if( ! decrementedPlayer->deathLogged &&
+                            ! decrementedPlayer->isTutorial ) {    
+                            logDeath( decrementedPlayer->id,
+                                      decrementedPlayer->email,
+                                      decrementedPlayer->isEve,
+                                      computeAge( decrementedPlayer ),
+                                      getSecondsPlayed( decrementedPlayer ),
+                                      ! getFemale( decrementedPlayer ),
+                                      deathPos.x, deathPos.y,
+                                      players.size() - 1,
+                                      false );
+                            }
                         
-                        if( shutdownMode ) {
+                        if( shutdownMode &&
+                            ! decrementedPlayer->isTutorial ) {
                             handleShutdownDeath( decrementedPlayer,
                                                  deathPos.x, deathPos.y );
                             }
@@ -8574,6 +12895,194 @@ int main() {
             }
         
 
+        if( playerIndicesToSendUpdatesAbout.size() > 0 ) {
+            
+            SimpleVector<char> updateList;
+        
+            for( int i=0; i<playerIndicesToSendUpdatesAbout.size(); i++ ) {
+                LiveObject *nextPlayer = players.getElement( 
+                    playerIndicesToSendUpdatesAbout.getElementDirect( i ) );
+                
+                char *playerString = autoSprintf( "%d, ", nextPlayer->id );
+                updateList.appendElementString( playerString );
+                
+                delete [] playerString;
+                }
+            
+            char *updateListString = updateList.getElementString();
+            
+            AppLog::infoF( "Need to send updates about these %d players: %s",
+                           playerIndicesToSendUpdatesAbout.size(),
+                           updateListString );
+            delete [] updateListString;
+            }
+        
+
+
+        double currentTimeHeat = Time::getCurrentTime();
+        
+        if( currentTimeHeat - lastHeatUpdateTime >= heatUpdateTimeStep ) {
+            // a heat step has passed
+            
+            
+            // recompute heat map here for next players in line
+            int r = 0;
+            for( r=lastPlayerIndexHeatRecomputed+1; 
+                 r < lastPlayerIndexHeatRecomputed + 1 + 
+                     numPlayersRecomputeHeatPerStep
+                     &&
+                     r < players.size(); r++ ) {
+                
+                recomputeHeatMap( players.getElement( r ) );
+                }
+            
+            lastPlayerIndexHeatRecomputed = r - 1;
+            
+            if( r == players.size() ) {
+                // done updating for last player
+                // start over
+                lastPlayerIndexHeatRecomputed = -1;
+                }
+            lastHeatUpdateTime = currentTimeHeat;
+            }
+        
+
+
+
+        // update personal heat value of any player that is due
+        // once every 2 seconds
+        currentTime = Time::getCurrentTime();
+        for( int i=0; i< players.size(); i++ ) {
+            LiveObject *nextPlayer = players.getElement( i );
+            
+            if( nextPlayer->error ||
+                currentTime - nextPlayer->lastHeatUpdate < heatUpdateSeconds ) {
+                continue;
+                }
+            
+            // in case we cross a biome boundary since last time
+            // there will be thermal shock that will take them to
+            // other side of target temp.
+            // 
+            // but never make them more comfortable (closer to
+            // target) then they were before
+            float oldDiffFromTarget = 
+                targetHeat - nextPlayer->bodyHeat;
+
+
+            
+            // body produces its own heat
+            // but only in a cold env
+            if( nextPlayer->envHeat < targetHeat ) {
+                nextPlayer->bodyHeat += 0.25;
+                }
+
+            nextPlayer->bodyHeat += computeClothingHeat( nextPlayer );
+
+            float clothingR = computeClothingR( nextPlayer );
+
+            // clothingR modulates heat lost (or gained) from environment
+            float clothingLeak = 1 - clothingR;
+
+            float heatDelta = 
+                clothingLeak * ( nextPlayer->envHeat - nextPlayer->bodyHeat );
+
+            // slow this down a bit
+            heatDelta *= 0.5;
+            
+            // feed through curve that is asymtotic at 1
+            // (so we never change heat faster than 1 unit per timestep)
+            
+            float heatDeltaAbs = fabs( heatDelta );
+            float heatDeltaSign = sign( heatDelta );
+
+            float maxDelta = 2;
+            // larger values make a sharper "knee"
+            float deltaSlope = 0.5;
+            
+            // max - max/(slope*x+1)
+            
+            float heatDeltaScaled = 
+                maxDelta - maxDelta / ( deltaSlope * heatDeltaAbs + 1 );
+            
+            heatDeltaScaled *= heatDeltaSign;
+
+
+            nextPlayer->bodyHeat += heatDeltaScaled;
+            
+  
+            if( nextPlayer->lastBiomeHeat != nextPlayer->biomeHeat ) {
+                
+          
+                float lastBiomeDiffFromTarget = 
+                    targetHeat - nextPlayer->lastBiomeHeat;
+            
+                float biomeDiffFromTarget = targetHeat - nextPlayer->biomeHeat;
+            
+                // for any biome
+                // there's a "shock" when you enter it, if it's heat value
+                // is on the other side of "perfect" from the last biome
+                // you were in.
+                if( lastBiomeDiffFromTarget != 0 &&
+                    biomeDiffFromTarget != 0 &&
+                    sign( lastBiomeDiffFromTarget ) != 
+                    sign( biomeDiffFromTarget ) ) {
+                
+                    // modulate this shock by clothing
+
+                    // but only if player does not have fever
+                    // we don't want to punish them for wearing clothes
+                    // if they get a fever
+                    if( nextPlayer->fever == 0 ) {
+                        nextPlayer->bodyHeat = 
+                            targetHeat - clothingLeak * biomeDiffFromTarget;
+                        
+                        float newDiffFromTarget =
+                            targetHeat - nextPlayer->bodyHeat;
+                        
+                        float oldAbs = fabs( oldDiffFromTarget );
+                        
+                        if( fabs( newDiffFromTarget ) < 
+                            oldAbs ) {
+                            // they used crossing boundary to become more
+                            // comfortable
+                            
+                            // force them to be no more comfortable than
+                            // they used to be
+                            nextPlayer->bodyHeat = 
+                                targetHeat - 
+                                sign( newDiffFromTarget ) * oldAbs;
+                            }
+
+                        }
+                    else {
+                        // direct shock, as if unclothed
+                        float airLeak = 1 - rAir;
+                        nextPlayer->bodyHeat = 
+                            targetHeat - airLeak * biomeDiffFromTarget;
+                        }
+                    }
+
+                // we've handled this shock
+                nextPlayer->lastBiomeHeat = nextPlayer->biomeHeat;
+                }
+            
+            float totalBodyHeat = nextPlayer->bodyHeat + nextPlayer->fever;
+            
+            // convert into 0..1 range, where 0.5 represents targetHeat
+            nextPlayer->heat = ( totalBodyHeat / targetHeat ) / 2;
+            if( nextPlayer->heat > 1 ) {
+                nextPlayer->heat = 1;
+                }
+            if( nextPlayer->heat < 0 ) {
+                nextPlayer->heat = 0;
+                }
+
+            nextPlayer->heatUpdate = true;
+            nextPlayer->lastHeatUpdate = currentTime;
+            }
+        
+
         
         for( int i=0; i<playerIndicesToSendUpdatesAbout.size(); i++ ) {
             LiveObject *nextPlayer = players.getElement( 
@@ -8583,527 +13092,113 @@ int main() {
                 continue;
                 }
             
-
-            // recompute heat map
+            // also force-recompute heat maps for players that are getting
+            // updated
+            // don't bother with this for now
+            // all players update on the same cycle
+            // recomputeHeatMap( nextPlayer );
             
             
-            // what if we recompute it from scratch every time?
-            for( int i=0; i<HEAT_MAP_D * HEAT_MAP_D; i++ ) {
-                nextPlayer->heatMap[i] = 0;
-                }
-
-            float heatOutputGrid[ HEAT_MAP_D * HEAT_MAP_D ];
-            float rGrid[ HEAT_MAP_D * HEAT_MAP_D ];
-
-            for( int y=0; y<HEAT_MAP_D; y++ ) {
-                int mapY = nextPlayer->ys + y - HEAT_MAP_D / 2;
-                
-                for( int x=0; x<HEAT_MAP_D; x++ ) {
-                    
-                    int mapX = nextPlayer->xs + x - HEAT_MAP_D / 2;
-                    
-                    int j = y * HEAT_MAP_D + x;
-                    heatOutputGrid[j] = 0;
-                    rGrid[j] = 0;
-                    
-                    heatOutputGrid[j] +=
-                        getBiomeHeatValue( getMapBiome( mapX, mapY ) );
-
-
-                    ObjectRecord *o = getObject( getMapObject( mapX, mapY ) );
-                    
-                    
-                    
-
-                    if( o != NULL ) {
-                        heatOutputGrid[j] += o->heatValue;
-                        if( o->permanent ) {
-                            // loose objects sitting on ground don't
-                            // contribute to r-value (like dropped clothing)
-                            rGrid[j] = o->rValue;
-                            }
-
-
-                        // skip checking for heat-producing contained items
-                        // for now.  Consumes too many server-side resources
-                        // can still check for heat produced by stuff in
-                        // held container (below).
-                        
-                        if( false && o->numSlots > 0 ) {
-                            // contained can produce heat shielded by container
-                            // r value
-                            double oRFactor = 1 - o->rValue;
-                            
-                            int numCont;
-                            int *cont = getContained( mapX, mapY, &numCont );
-                            
-                            if( cont != NULL ) {
-                                
-                                for( int c=0; c<numCont; c++ ) {
-                                    
-                                    int cID = cont[c];
-                                    char hasSub = false;
-                                    if( cID < 0 ) {
-                                        hasSub = true;
-                                        cID = -cID;
-                                        }
-
-                                    ObjectRecord *cO = getObject( cID );
-                                    heatOutputGrid[j] += 
-                                        cO->heatValue * oRFactor;
-                                    
-                                    if( hasSub ) {
-                                        double cRFactor = 1 - cO->rValue;
-                                        
-                                        int numSub;
-                                        int *sub = getContained( mapX, mapY, 
-                                                                 &numSub, 
-                                                                 c + 1 );
-                                        if( sub != NULL ) {
-                                            for( int s=0; s<numSub; s++ ) {
-                                                ObjectRecord *sO = 
-                                                    getObject( sub[s] );
-                                                
-                                                heatOutputGrid[j] += 
-                                                    sO->heatValue * 
-                                                    cRFactor * 
-                                                    oRFactor;
-                                                }
-                                            delete [] sub;
-                                            }
-                                        }
-                                    }
-                                delete [] cont;
-                                }
-                            }
-                        }
-                    
-
-                    // floor can insulate or produce heat too
-                    ObjectRecord *fO = getObject( getMapFloor( mapX, mapY ) );
-                    
-                    if( fO != NULL ) {
-                        heatOutputGrid[j] += fO->heatValue;
-                        rGrid[j] += fO->rValue;
-                        }
-                    }
-                }
-
-            // clothing is additive to R value at center spot
-
-            float headWeight = 0.25;
-            float chestWeight = 0.35;
-            float buttWeight = 0.2;
-            float eachFootWeigth = 0.1;
             
-            float backWeight = 0.1;
-
-
-            float clothingR = 0;
+            newUpdates.push_back( getUpdateRecord( nextPlayer, false ) );
             
-            if( nextPlayer->clothing.hat != NULL ) {
-                clothingR += headWeight *  nextPlayer->clothing.hat->rValue;
-                }
-            if( nextPlayer->clothing.tunic != NULL ) {
-                clothingR += chestWeight * nextPlayer->clothing.tunic->rValue;
-                }
-            if( nextPlayer->clothing.frontShoe != NULL ) {
-                clothingR += 
-                    eachFootWeigth * nextPlayer->clothing.frontShoe->rValue;
-                }
-            if( nextPlayer->clothing.backShoe != NULL ) {
-                clothingR += eachFootWeigth * 
-                    nextPlayer->clothing.backShoe->rValue;
-                }
-            if( nextPlayer->clothing.bottom != NULL ) {
-                clothingR += buttWeight * nextPlayer->clothing.bottom->rValue;
-                }
-            if( nextPlayer->clothing.backpack != NULL ) {
-                clothingR += backWeight * nextPlayer->clothing.backpack->rValue;
-                }
-
-            //printf( "Clothing r = %f\n", clothingR );
-            
-            
-            int playerMapIndex = 
-                ( HEAT_MAP_D / 2 ) * HEAT_MAP_D +
-                ( HEAT_MAP_D / 2 );
-            
-
-            rGrid[ playerMapIndex ] += clothingR;
-            
-            
-            if( rGrid[ playerMapIndex ] > 1 ) {
-                
-                rGrid[ playerMapIndex ] = 1;
-                }
-            
-
-            // body itself produces 1 unit of heat
-            // (r value of clothing can hold this in
-            heatOutputGrid[ playerMapIndex ] += 1;
-            
-
-            // what player is holding can contribute heat
-            if( nextPlayer->holdingID > 0 ) {
-                ObjectRecord *heldO = getObject( nextPlayer->holdingID );
-                
-                heatOutputGrid[ playerMapIndex ] += heldO->heatValue;
-                
-                double heldRFactor = 1 - heldO->rValue;
-                
-                // contained can contribute too, but shielded by r-value
-                // of container
-                for( int c=0; c<nextPlayer->numContained; c++ ) {
-                    
-                    int cID = nextPlayer->containedIDs[c];
-                    char hasSub = false;
-                    
-                    if( cID < 0 ) {
-                        hasSub = true;
-                        cID = -cID;
-                        }
-
-                    ObjectRecord *contO = getObject( cID );
-                    
-                    heatOutputGrid[ playerMapIndex ] += 
-                        contO->heatValue * heldRFactor;
-                    
-
-                    if( hasSub ) {
-                        // sub contained too, but shielded by both r-values
-                        double contRFactor = 1 - contO->rValue;
-
-                        for( int s=0; 
-                             s<nextPlayer->subContainedIDs[c].size(); s++ ) {
-                        
-                            ObjectRecord *subO =
-                                getObject( nextPlayer->subContainedIDs[c].
-                                       getElementDirect( s ) );
-                            
-                            heatOutputGrid[ playerMapIndex ] += 
-                                subO->heatValue * 
-                                contRFactor * heldRFactor;
-                            }
-                        }
-                    }
-                }
-            
-            // clothing can contribute heat
-            for( int c=0; c<NUM_CLOTHING_PIECES; c++ ) {
-                
-                ObjectRecord *cO = clothingByIndex( nextPlayer->clothing, c );
-            
-                if( cO != NULL ) {
-                    heatOutputGrid[playerMapIndex ] += cO->heatValue;
-
-                    // contained items in clothing can contribute
-                    // heat, shielded by clothing r-values
-                    double cRFactor = 1 - cO->rValue;
-
-                    for( int s=0; 
-                         s < nextPlayer->clothingContained[c].size(); s++ ) {
-                        
-                        ObjectRecord *sO = 
-                            getObject( nextPlayer->clothingContained[c].
-                                       getElementDirect( s ) );
-                        
-                        heatOutputGrid[ playerMapIndex ] += 
-                            sO->heatValue * cRFactor;
-                        }
-                    }
-                }
-            
-
-            
-            //double startTime = Time::getCurrentTime();
-            
-            int numCycles = 8;
-            
-            int numNeighbors = 8;
-            int ndx[8] = { 0, 1,  0, -1,  1,  1, -1, -1 };
-            int ndy[8] = { 1, 0, -1,  0,  1, -1,  1, -1 };
-            
-            // found equation here:
-            // http://demonstrations.wolfram.com/
-            //        ACellularAutomatonBasedHeatEquation/
-            // diags have way less contact area
-            double nWeights[8] = { 4, 4, 4, 4, 1, 1, 1, 1 };
-            
-            double totalNWeight = 20;
-            
-            
-            //double startTime = Time::getCurrentTime();
-
-            for( int c=0; c<numCycles; c++ ) {
-                
-                float tempHeatGrid[ HEAT_MAP_D * HEAT_MAP_D ];
-                memcpy( tempHeatGrid, nextPlayer->heatMap, 
-                        HEAT_MAP_D * HEAT_MAP_D * sizeof( float ) );
-                
-                for( int y=1; y<HEAT_MAP_D-1; y++ ) {
-                    for( int x=1; x<HEAT_MAP_D-1; x++ ) {
-                        int j = y * HEAT_MAP_D + x;
-            
-                        float heatDelta = 0;
-                
-                        float centerLeak = 1 - rGrid[j];
-
-                        float centerOldHeat = tempHeatGrid[j];
-
-                        for( int n=0; n<numNeighbors; n++ ) {
-                
-                            int nx = x + ndx[n];
-                            int ny = y + ndy[n];
-                        
-                            int nj = ny * HEAT_MAP_D + nx;
-                        
-                            float nLeak = 1 - rGrid[ nj ];
-                    
-                            heatDelta += nWeights[n] * centerLeak * nLeak *
-                                ( tempHeatGrid[ nj ] - centerOldHeat );
-                            }
-                
-                        nextPlayer->heatMap[j] = 
-                            tempHeatGrid[j] + heatDelta / totalNWeight;
-                
-                        nextPlayer->heatMap[j] += heatOutputGrid[j];
-                        }
-                    }
-                } 
-            
-            //printf( "Computing %d cycles took %f ms\n",
-            //        numCycles, 
-            //        ( Time::getCurrentTime() - startTime ) * 1000 );
-            /*
-            printf( "Player heat map:\n" );
-            
-            for( int y=0; y<HEAT_MAP_D; y++ ) {
-                
-                for( int x=0; x<HEAT_MAP_D; x++ ) {                    
-                    int j = y * HEAT_MAP_D + x;
-                    
-                    printf( "%04.1f ", 
-                            nextPlayer->heatMap[ j ] );
-                            //tempHeatGrid[ y * HEAT_MAP_D + x ] );
-                    }
-                printf( "\n" );
-
-                char anyTags = false;
-                for( int x=0; x<HEAT_MAP_D; x++ ) {
-                    int j = y * HEAT_MAP_D + x;
-                    
-                    if( j == playerMapIndex ) {
-                        anyTags = true;
-                        break;
-                        }
-                    if( heatOutputGrid[ j ] > 0 ) {
-                        anyTags = true;
-                        break;
-                        }
-                    }
-                
-                if( anyTags ) {
-                    for( int x=0; x<HEAT_MAP_D; x++ ) {                    
-                        int j = y * HEAT_MAP_D + x;
-                        if( j == playerMapIndex ) {
-                            printf( "p" );
-                            }
-                        else printf( " " );
-                        
-                        if( heatOutputGrid[j] > 0 ) {
-                            printf( "H%d   ", 
-                                    heatOutputGrid[j] );
-                            }
-                        else {
-                            printf( "    " );
-                            }
-                        }
-                    printf( "\n" );
-                    }
-                }
-            */
-
-            float playerHeat = 
-                nextPlayer->heatMap[ playerMapIndex ];
-            
-            // printf( "Player heat = %f\n", playerHeat );
-            
-            // convert into 0..1 range, where 0.5 represents targetHeat
-            nextPlayer->heat = ( playerHeat / targetHeat ) / 2;
-            if( nextPlayer->heat > 1 ) {
-                nextPlayer->heat = 1;
-                }
-            if( nextPlayer->heat < 0 ) {
-                nextPlayer->heat = 0;
-                }
-
-            
-            char *updateLine = getUpdateLine( nextPlayer, false );
-
-            
-            nextPlayer->posForced = false;
-
-            newUpdates.appendElementString( updateLine );
             newUpdatePlayerIDs.push_back( nextPlayer->id );
             
-            ChangePosition p = { nextPlayer->xs, nextPlayer->ys, false };
+
+            if( nextPlayer->posForced &&
+                nextPlayer->connected &&
+                SettingsManager::getIntSetting( "requireClientForceAck", 1 ) ) {
+                // block additional moves/actions from this player until
+                // we get a FORCE response, syncing them up with
+                // their forced position.
+                
+                // don't do this for disconnected players
+                nextPlayer->waitingForForceResponse = true;
+                }
+            nextPlayer->posForced = false;
+
+
+            ChangePosition p = { nextPlayer->xs, nextPlayer->ys, 
+                                 nextPlayer->updateGlobal };
             newUpdatesPos.push_back( p );
 
-            delete [] updateLine;
 
             nextPlayer->updateSent = true;
+            nextPlayer->updateGlobal = false;
             }
+        
+        
+
+        if( newUpdates.size() > 0 ) {
+            
+            SimpleVector<char> trueUpdateList;
+            
+            
+            for( int i=0; i<newUpdates.size(); i++ ) {
+                char *s = autoSprintf( 
+                    "%d, ", newUpdatePlayerIDs.getElementDirect( i ) );
+                trueUpdateList.appendElementString( s );
+                delete [] s;
+                }
+            
+            char *updateListString = trueUpdateList.getElementString();
+            
+            AppLog::infoF( "Sending updates about these %d players: %s",
+                           newUpdatePlayerIDs.size(),
+                           updateListString );
+            delete [] updateListString;
+            }
+        
         
 
         
         SimpleVector<ChangePosition> movesPos;        
 
-        char *moveMessageText = getMovesMessage( true, &movesPos );
+        SimpleVector<MoveRecord> moveList = getMoveRecords( true, &movesPos );
         
-        unsigned char *moveMessage = NULL;
-        int moveMessageLength = 0;
-        
-        if( moveMessageText != NULL ) {
-            moveMessage = (unsigned char*)moveMessageText;
-            moveMessageLength = strlen( moveMessageText );
-
-            if( moveMessageLength > maxUncompressedSize ) {
-                moveMessage = makeCompressedMessage( moveMessageText,
-                                                     moveMessageLength,
-                                                     &moveMessageLength );
-                delete [] moveMessageText;
-                }    
-            }
         
                 
 
 
 
-        unsigned char *updateMessage = NULL;
-        int updateMessageLength = 0;
-        
-        if( newUpdates.size() > 0 ) {
-            newUpdates.push_back( '#' );
-            char *temp = newUpdates.getElementString();
-
-            char *updateMessageText = concatonate( "PU\n", temp );
-            delete [] temp;
-
-            updateMessageLength = strlen( updateMessageText );
-
-            if( updateMessageLength < maxUncompressedSize ) {
-                updateMessage = (unsigned char*)updateMessageText;
-                }
-            else {
-                // compress for all players once here
-                updateMessage = makeCompressedMessage( 
-                    updateMessageText, 
-                    updateMessageLength, &updateMessageLength );
-                
-                delete [] updateMessageText;
-                }
-            }
 
 
 
 
-        unsigned char *outOfRangeMessage = NULL;
-        int outOfRangeMessageLength = 0;
-        
-        if( newUpdatePlayerIDs.size() > 0 ) {
-            SimpleVector<char> messageChars;
-            
-            messageChars.appendElementString( "PO\n" );
-            
-            for( int i=0; i<newUpdatePlayerIDs.size(); i++ ) {
-                char buffer[20];
-                sprintf( buffer, "%d\n",
-                         newUpdatePlayerIDs.getElementDirect( i ) );
-                
-                messageChars.appendElementString( buffer );
-                }
-            messageChars.push_back( '#' );
-
-            char *outOfRangeMessageText = messageChars.getElementString();
-
-            outOfRangeMessageLength = strlen( outOfRangeMessageText );
-
-            if( outOfRangeMessageLength < maxUncompressedSize ) {
-                outOfRangeMessage = (unsigned char*)outOfRangeMessageText;
-                }
-            else {
-                // compress for all players once here
-                outOfRangeMessage = makeCompressedMessage( 
-                    outOfRangeMessageText, 
-                    outOfRangeMessageLength, &outOfRangeMessageLength );
-                
-                delete [] outOfRangeMessageText;
-                }
-            }
         
 
         
 
-        unsigned char *deleteUpdateMessage = NULL;
-        int deleteUpdateMessageLength = 0;
-        
-        if( newDeleteUpdates.size() > 0 ) {
-            newDeleteUpdates.push_back( '#' );
-            char *temp = newDeleteUpdates.getElementString();
-            
-            char *deleteUpdateMessageText = concatonate( "PU\n", temp );
-            delete [] temp;
-
-            deleteUpdateMessageLength = strlen( deleteUpdateMessageText );
-
-            if( deleteUpdateMessageLength < maxUncompressedSize ) {
-                deleteUpdateMessage = (unsigned char*)deleteUpdateMessageText;
-                }
-            else {
-                // compress for all players once here
-                deleteUpdateMessage = makeCompressedMessage( 
-                    deleteUpdateMessageText, 
-                    deleteUpdateMessageLength, &deleteUpdateMessageLength );
-                
-                delete [] deleteUpdateMessageText;
-                }
-            }
-        
-
-        
-                
-
-        // add changes from auto-decays on map, mixed with player-caused changes
+        // add changes from auto-decays on map, 
+        // mixed with player-caused changes
         stepMap( &mapChanges, &mapChangesPos );
         
+        
 
         
-        
-        unsigned char *mapChangeMessage = NULL;
-        int mapChangeMessageLength = 0;
-        
-        if( mapChanges.size() > 0 ) {
-            mapChanges.push_back( '#' );
-            char *temp = mapChanges.getElementString();
+        if( periodicStepThisStep ) {
 
-            char *mapChangeMessageText = concatonate( "MX\n", temp );
-            delete [] temp;
-
-            mapChangeMessageLength = strlen( mapChangeMessageText );
-            
-            if( mapChangeMessageLength < maxUncompressedSize ) {
-                mapChangeMessage = (unsigned char*)mapChangeMessageText;
-                }
-            else {
-                // compress for all players once here
-                mapChangeMessage = makeCompressedMessage( 
-                    mapChangeMessageText, 
-                    mapChangeMessageLength, &mapChangeMessageLength );
+            // figure out who has recieved a new curse token
+            // they are sent a message about it below (CX)
+            SimpleVector<char*> newCurseTokenEmails;
+            getNewCurseTokenHolders( &newCurseTokenEmails );
+        
+            for( int i=0; i<newCurseTokenEmails.size(); i++ ) {
+                char *email = newCurseTokenEmails.getElementDirect( i );
                 
-                delete [] mapChangeMessageText;
+                for( int j=0; j<numLive; j++ ) {
+                    LiveObject *nextPlayer = players.getElement(j);
+                    
+                    if( strcmp( nextPlayer->email, email ) == 0 ) {
+                        
+                        nextPlayer->curseTokenCount = 1;
+                        nextPlayer->curseTokenUpdate = true;
+                        break;
+                        }
+                    }
+                
+                delete [] email;
                 }
-
             }
         
 
@@ -9133,6 +13228,9 @@ int main() {
                 }
 
             }
+
+
+
 
 
         unsigned char *lineageMessage = NULL;
@@ -9184,6 +13282,55 @@ int main() {
                         lineageMessageLength, &lineageMessageLength );
                     
                     delete [] lineageMessageText;
+                    }
+                }
+            }
+
+
+
+
+        unsigned char *cursesMessage = NULL;
+        int cursesMessageLength = 0;
+        
+        if( playerIndicesToSendCursesAbout.size() > 0 ) {
+            SimpleVector<char> curseWorking;
+            curseWorking.appendElementString( "CU\n" );
+            
+            int numAdded = 0;
+            for( int i=0; i<playerIndicesToSendCursesAbout.size(); i++ ) {
+                LiveObject *nextPlayer = players.getElement( 
+                    playerIndicesToSendCursesAbout.getElementDirect( i ) );
+
+                if( nextPlayer->error ) {
+                    continue;
+                    }
+
+                char *line = autoSprintf( "%d %d\n", nextPlayer->id,
+                                         nextPlayer->curseStatus.curseLevel );
+                
+                curseWorking.appendElementString( line );
+                delete [] line;
+                numAdded++;
+                }
+            
+            curseWorking.push_back( '#' );
+            
+            if( numAdded > 0 ) {
+
+                char *cursesMessageText = curseWorking.getElementString();
+                
+                cursesMessageLength = strlen( cursesMessageText );
+                
+                if( cursesMessageLength < maxUncompressedSize ) {
+                    cursesMessage = (unsigned char*)cursesMessageText;
+                    }
+                else {
+                    // compress for all players once here
+                    cursesMessage = makeCompressedMessage( 
+                        cursesMessageText, 
+                        cursesMessageLength, &cursesMessageLength );
+                    
+                    delete [] cursesMessageText;
                     }
                 }
             }
@@ -9253,9 +13400,18 @@ int main() {
                 if( nextPlayer->error ) {
                     continue;
                     }
-
-                char *line = autoSprintf( "%d\n", nextPlayer->id );
-
+                
+                char *line;
+                
+                if( nextPlayer->holdingEtaDecay > 0 ) {
+                    // what they have will cure itself in time
+                    // flag as sick
+                    line = autoSprintf( "%d 1\n", nextPlayer->id );
+                    }
+                else {
+                    line = autoSprintf( "%d\n", nextPlayer->id );
+                    }
+                
                 numAdded++;
                 dyingWorking.appendElementString( line );
                 delete [] line;
@@ -9282,13 +13438,156 @@ int main() {
                     }
                 }
             }
+
+
+
+
+        unsigned char *healingMessage = NULL;
+        int healingMessageLength = 0;
+        
+        if( playerIndicesToSendHealingAbout.size() > 0 ) {
+            SimpleVector<char> healingWorking;
+            healingWorking.appendElementString( "HE\n" );
+            
+            int numAdded = 0;
+            for( int i=0; i<playerIndicesToSendHealingAbout.size(); i++ ) {
+                LiveObject *nextPlayer = players.getElement( 
+                    playerIndicesToSendHealingAbout.getElementDirect( i ) );
+
+                if( nextPlayer->error ) {
+                    continue;
+                    }
+
+                char *line = autoSprintf( "%d\n", nextPlayer->id );
+
+                numAdded++;
+                healingWorking.appendElementString( line );
+                delete [] line;
+                }
+            
+            healingWorking.push_back( '#' );
+            
+            if( numAdded > 0 ) {
+
+                char *healingMessageText = healingWorking.getElementString();
+                
+                healingMessageLength = strlen( healingMessageText );
+                
+                if( healingMessageLength < maxUncompressedSize ) {
+                    healingMessage = (unsigned char*)healingMessageText;
+                    }
+                else {
+                    // compress for all players once here
+                    healingMessage = makeCompressedMessage( 
+                        healingMessageText, 
+                        healingMessageLength, &healingMessageLength );
+                    
+                    delete [] healingMessageText;
+                    }
+                }
+            }
+
+
+
+
+        unsigned char *emotMessage = NULL;
+        int emotMessageLength = 0;
+        
+        if( newEmotPlayerIDs.size() > 0 ) {
+            SimpleVector<char> emotWorking;
+            emotWorking.appendElementString( "PE\n" );
+            
+            int numAdded = 0;
+            for( int i=0; i<newEmotPlayerIDs.size(); i++ ) {
+                
+                int ttl = newEmotTTLs.getElementDirect( i );
+
+                char *line;
+                
+                if( ttl == 0  ) {
+                    line = autoSprintf( 
+                        "%d %d\n", 
+                        newEmotPlayerIDs.getElementDirect( i ), 
+                        newEmotIndices.getElementDirect( i ) );
+                    }
+                else {
+                    line = autoSprintf( 
+                        "%d %d %d\n", 
+                        newEmotPlayerIDs.getElementDirect( i ), 
+                        newEmotIndices.getElementDirect( i ),
+                        newEmotTTLs.getElementDirect( i ) );
+                    }
+                
+                numAdded++;
+                emotWorking.appendElementString( line );
+                delete [] line;
+                }
+            
+            emotWorking.push_back( '#' );
+            
+            if( numAdded > 0 ) {
+
+                char *emotMessageText = emotWorking.getElementString();
+                
+                emotMessageLength = strlen( emotMessageText );
+                
+                if( emotMessageLength < maxUncompressedSize ) {
+                    emotMessage = (unsigned char*)emotMessageText;
+                    }
+                else {
+                    // compress for all players once here
+                    emotMessage = makeCompressedMessage( 
+                        emotMessageText, 
+                        emotMessageLength, &emotMessageLength );
+                    
+                    delete [] emotMessageText;
+                    }
+                }
+            }
+
         
         
         // send moves and updates to clients
         
+        
+        SimpleVector<int> playersReceivingPlayerUpdate;
+        
+
         for( int i=0; i<numLive; i++ ) {
             
             LiveObject *nextPlayer = players.getElement(i);
+            
+            
+            // everyone gets all flight messages
+            // even if they haven't gotten first message yet
+            // (because the flier will get their first message again
+            // when they land, and we need to tell them about flight first)
+            if( nextPlayer->firstMapSent ||
+                nextPlayer->inFlight ) {
+                                
+                if( newFlightDest.size() > 0 ) {
+                    
+                    // compose FD messages for this player
+                    
+                    for( int u=0; u<newFlightDest.size(); u++ ) {
+                        FlightDest *f = newFlightDest.getElement( u );
+                        
+                        char *flightMessage = 
+                            autoSprintf( "FD\n%d %d %d\n#",
+                                         f->playerID,
+                                         f->destPos.x -
+                                         nextPlayer->birthPos.x, 
+                                         f->destPos.y -
+                                         nextPlayer->birthPos.y );
+                        
+                        sendMessageToPlayer( nextPlayer, flightMessage,
+                                             strlen( flightMessage ) );
+                        delete [] flightMessage;
+                        }
+                    }
+                }
+
+            
 
             
             if( ! nextPlayer->firstMessageSent ) {
@@ -9323,10 +13622,28 @@ int main() {
                         continue;
                         }
 
+                    char oWasForced = o->posForced;
                     
+                    if( nextPlayer->inFlight ) {
+                        // not a true first message
+                        
+                        // force all positions for all players
+                        o->posForced = true;
+                        }
+                    
+
                     // true mid-move positions for first message
-                    char *messageLine = getUpdateLine( o, false, true );
+                    // all relative to new player's birth pos
+                    char *messageLine = getUpdateLine( o, 
+                                                       nextPlayer->birthPos,
+                                                       false, true );
                     
+                    if( nextPlayer->inFlight ) {
+                        // restore
+                        o->posForced = oWasForced;
+                        }
+                    
+
                     // skip sending info about errored players in
                     // first message
                     if( o->id != nextPlayer->id ) {
@@ -9354,7 +13671,8 @@ int main() {
                 delete [] message;
                 
 
-                char *movesMessage = getMovesMessage( false );
+                char *movesMessage = getMovesMessage( false, 
+                                                      nextPlayer->birthPos );
                 
                 if( movesMessage != NULL ) {
                     
@@ -9448,6 +13766,64 @@ int main() {
 
 
 
+                // send cursed status for all living cursed
+                
+                SimpleVector<char> cursesWorking;
+                cursesWorking.appendElementString( "CU\n" );
+
+                numAdded = 0;
+                
+                for( int i=0; i<numPlayers; i++ ) {
+                
+                    LiveObject *o = players.getElement( i );
+                
+                    if( o->error ) {
+                        continue;
+                        }
+
+                    int level = o->curseStatus.curseLevel;
+                    
+                    if( level == 0 ) {
+                        continue;
+                        }
+                    
+
+                    char *line = autoSprintf( "%d %d\n", o->id, level );
+                    cursesWorking.appendElementString( line );
+                    delete [] line;
+                    
+                    numAdded++;
+                    }
+                
+                cursesWorking.push_back( '#' );
+            
+                if( numAdded > 0 ) {
+                    char *cursesMessage = cursesWorking.getElementString();
+
+
+                    sendMessageToPlayer( nextPlayer, cursesMessage, 
+                                         strlen( cursesMessage ) );
+                
+                    delete [] cursesMessage;
+                    }
+                
+
+                if( nextPlayer->curseStatus.curseLevel > 0 ) {
+                    // send player their personal report about how
+                    // many excess curse points they have
+                    
+                    char *message = autoSprintf( 
+                        "CS\n%d#", 
+                        nextPlayer->curseStatus.excessPoints );
+
+                    sendMessageToPlayer( nextPlayer, message, 
+                                         strlen( message ) );
+                
+                    delete [] message;
+                    }
+                
+
+
 
                 // send dying for everyone who is dying
                 
@@ -9485,10 +13861,90 @@ int main() {
 
                 
                 nextPlayer->firstMessageSent = true;
+                nextPlayer->inFlight = false;
                 }
             else {
                 // this player has first message, ready for updates/moves
                 
+
+                if( nextPlayer->monumentPosSet && 
+                    ! nextPlayer->monumentPosSent &&
+                    computeAge( nextPlayer ) > 0.5 ) {
+                    
+                    // they learned about a monument from their mother
+                    
+                    // wait until they are half a year old to tell them
+                    // so they have a chance to load the sound first
+                    
+                    char *monMessage = 
+                        autoSprintf( "MN\n%d %d %d\n#", 
+                                     nextPlayer->lastMonumentPos.x -
+                                     nextPlayer->birthPos.x, 
+                                     nextPlayer->lastMonumentPos.y -
+                                     nextPlayer->birthPos.y,
+                                     nextPlayer->lastMonumentID );
+                    
+                    sendMessageToPlayer( nextPlayer, monMessage, 
+                                         strlen( monMessage ) );
+                    
+                    nextPlayer->monumentPosSent = true;
+                    
+                    delete [] monMessage;
+                    }
+
+
+
+
+                // everyone gets all grave messages
+                if( newGraves.size() > 0 ) {
+                    
+                    // compose GV messages for this player
+                    
+                    for( int u=0; u<newGraves.size(); u++ ) {
+                        GraveInfo *g = newGraves.getElement( u );
+                        
+                        char *graveMessage = 
+                            autoSprintf( "GV\n%d %d %d\n#", 
+                                         g->pos.x -
+                                         nextPlayer->birthPos.x, 
+                                         g->pos.y -
+                                         nextPlayer->birthPos.y,
+                                         g->playerID );
+                        
+                        sendMessageToPlayer( nextPlayer, graveMessage,
+                                             strlen( graveMessage ) );
+                        delete [] graveMessage;
+                        }
+                    }
+
+
+                // everyone gets all grave move messages
+                if( newGraveMoves.size() > 0 ) {
+                    
+                    // compose GM messages for this player
+                    
+                    for( int u=0; u<newGraveMoves.size(); u++ ) {
+                        GraveMoveInfo *g = newGraveMoves.getElement( u );
+                        
+                        char *graveMessage = 
+                            autoSprintf( "GM\n%d %d %d %d\n#", 
+                                         g->posStart.x -
+                                         nextPlayer->birthPos.x,
+                                         g->posStart.y -
+                                         nextPlayer->birthPos.y,
+                                         g->posEnd.x -
+                                         nextPlayer->birthPos.x,
+                                         g->posEnd.y -
+                                         nextPlayer->birthPos.y );
+                        
+                        sendMessageToPlayer( nextPlayer, graveMessage,
+                                             strlen( graveMessage ) );
+                        delete [] graveMessage;
+                        }
+                    }
+                
+                
+
                 int playerXD = nextPlayer->xd;
                 int playerYD = nextPlayer->yd;
                 
@@ -9496,17 +13952,21 @@ int main() {
                     LiveObject *holdingPlayer = 
                         getLiveObject( nextPlayer->heldByOtherID );
                 
-                    playerXD = holdingPlayer->xd;
-                    playerYD = holdingPlayer->yd;
+                    if( holdingPlayer != NULL ) {
+                        playerXD = holdingPlayer->xd;
+                        playerYD = holdingPlayer->yd;
+                        }
                     }
 
 
                 if( abs( playerXD - nextPlayer->lastSentMapX ) > 7
                     ||
-                    abs( playerYD - nextPlayer->lastSentMapY ) > 8 ) {
+                    abs( playerYD - nextPlayer->lastSentMapY ) > 8 
+                    ||
+                    ! nextPlayer->firstMapSent ) {
                 
                     // moving out of bounds of chunk, send update
-                    
+                    // or player flagged as needing first map again
                     
                     sendMapChunkMessage( nextPlayer,
                                          // override if held
@@ -9554,7 +14014,8 @@ int main() {
                                         // is close enough
                                         // send update about baby
                                         char *updateLine = 
-                                            getUpdateLine( otherPlayer, 
+                                            getUpdateLine( otherPlayer,
+                                                           nextPlayer->birthPos,
                                                            false ); 
                                     
                                         chunkPlayerUpdates.
@@ -9570,7 +14031,11 @@ int main() {
                     int ourHolderID = -1;
                     
                     if( nextPlayer->heldByOther ) {
-                        ourHolderID = getAdultHolding( nextPlayer )->id;
+                        LiveObject *adult = getAdultHolding( nextPlayer );
+                        
+                        if( adult != NULL ) {
+                            ourHolderID = adult->id;
+                            }
                         }
                     
                     // now send updates about all non-held babies,
@@ -9609,7 +14074,9 @@ int main() {
                                 // and what they're holding
 
                                 char *updateLine = 
-                                    getUpdateLine( otherPlayer, false ); 
+                                    getUpdateLine( otherPlayer, 
+                                                   nextPlayer->birthPos,
+                                                   false ); 
                                     
                                 chunkPlayerUpdates.appendElementString( 
                                     updateLine );
@@ -9663,32 +14130,68 @@ int main() {
 
                 // do this first, so that PU messages about what they 
                 // are holding post-wound come later                
-                if( dyingMessage != NULL ) {
+                if( dyingMessage != NULL && nextPlayer->connected ) {
                     int numSent = 
                         nextPlayer->sock->send( 
                             dyingMessage, 
                             dyingMessageLength, 
                             false, false );
                     
-                    if( numSent != dyingMessageLength ) {
-                        setDeathReason( nextPlayer, "disconnected" );
+                    nextPlayer->gotPartOfThisFrame = true;
 
-                        nextPlayer->error = true;
-                        nextPlayer->errorCauseString =
-                            "Socket write failed";
+                    if( numSent != dyingMessageLength ) {
+                        setPlayerDisconnected( nextPlayer, 
+                                               "Socket write failed" );
                         }
                     }
 
+
+                // EVERYONE gets info about now-healed players           
+                if( healingMessage != NULL && nextPlayer->connected ) {
+                    int numSent = 
+                        nextPlayer->sock->send( 
+                            healingMessage, 
+                            healingMessageLength, 
+                            false, false );
+                    
+                    nextPlayer->gotPartOfThisFrame = true;
+                    
+                    if( numSent != healingMessageLength ) {
+                        setPlayerDisconnected( nextPlayer, 
+                                               "Socket write failed" );
+                        }
+                    }
+
+
+                // EVERYONE gets info about emots           
+                if( emotMessage != NULL && nextPlayer->connected ) {
+                    int numSent = 
+                        nextPlayer->sock->send( 
+                            emotMessage, 
+                            emotMessageLength, 
+                            false, false );
+                    
+                    nextPlayer->gotPartOfThisFrame = true;
+                    
+                    if( numSent != emotMessageLength ) {
+                        setPlayerDisconnected( nextPlayer, 
+                                               "Socket write failed" );
+                        }
+                    }
 
                 
 
                 double maxDist = 32;
                 double maxDist2 = maxDist * 2;
 
-                if( updateMessage != NULL ) {
+                if( newUpdates.size() > 0 && nextPlayer->connected ) {
 
                     double minUpdateDist = maxDist2 * 2;
                     
+                    // greater than maxDis but within maxDist2
+                    SimpleVector<int> middleDistancePlayerIDs;
+                    
+
                     for( int u=0; u<newUpdatesPos.size(); u++ ) {
                         ChangePosition *p = newUpdatesPos.getElement( u );
                         
@@ -9705,46 +14208,153 @@ int main() {
                             if( d < minUpdateDist ) {
                                 minUpdateDist = d;
                                 }
+                            if( d > maxDist && d <= maxDist2 ) {
+                                middleDistancePlayerIDs.push_back(
+                                    newUpdatePlayerIDs.getElementDirect( u ) );
+                                }
                             }
                         }
 
                     if( minUpdateDist <= maxDist ) {
-                        int numSent = 
-                            nextPlayer->sock->send( 
-                                updateMessage, 
-                                updateMessageLength, 
-                                false, false );
+                        // some updates close enough
 
-                        if( numSent != updateMessageLength ) {
-                            setDeathReason( nextPlayer, "disconnected" );
+                        // compose PU mesage for this player
+                        
+                        unsigned char *updateMessage = NULL;
+                        int updateMessageLength = 0;
+                        SimpleVector<char> updateChars;
+                        
+                        for( int u=0; u<newUpdates.size(); u++ ) {
+                            ChangePosition *p = newUpdatesPos.getElement( u );
+                        
+                            double d = intDist( p->x, p->y, 
+                                                playerXD, playerYD );
+                            
+                            if( ! p->global && d > maxDist ) {
+                                // skip this one, too far away
+                                continue;
+                                }
+                            
+                            char *line =
+                                getUpdateLineFromRecord( 
+                                    newUpdates.getElement( u ),
+                                    nextPlayer->birthPos );
+                            
+                            updateChars.appendElementString( line );
+                            delete [] line;
+                            }
+                        
 
-                            nextPlayer->error = true;
-                            nextPlayer->errorCauseString =
-                                "Socket write failed";
+                        if( updateChars.size() > 0 ) {
+                            updateChars.push_back( '#' );
+                            char *temp = updateChars.getElementString();
+
+                            char *updateMessageText = 
+                                concatonate( "PU\n", temp );
+                            delete [] temp;
+                            
+                            updateMessageLength = strlen( updateMessageText );
+
+                            if( updateMessageLength < maxUncompressedSize ) {
+                                updateMessage = 
+                                    (unsigned char*)updateMessageText;
+                                }
+                            else {
+                                updateMessage = makeCompressedMessage( 
+                                    updateMessageText, 
+                                    updateMessageLength, &updateMessageLength );
+                
+                                delete [] updateMessageText;
+                                }
+                            }
+
+                        if( updateMessage != NULL ) {
+                            playersReceivingPlayerUpdate.push_back( 
+                                nextPlayer->id );
+                            
+                            int numSent = 
+                                nextPlayer->sock->send( 
+                                    updateMessage, 
+                                    updateMessageLength, 
+                                    false, false );
+                            
+                            nextPlayer->gotPartOfThisFrame = true;
+                            
+                            delete [] updateMessage;
+                            
+                            if( numSent != updateMessageLength ) {
+                                setPlayerDisconnected( nextPlayer, 
+                                                       "Socket write failed" );
+                                }
                             }
                         }
-                    else if( minUpdateDist <= maxDist2 && 
-                             outOfRangeMessage != NULL ) {
-                        // everyone in the PU is out of range
-                        // but some of them are in middle range 
+                    
+
+                    if( middleDistancePlayerIDs.size() > 0 ) {
+
+                        unsigned char *outOfRangeMessage = NULL;
+                        int outOfRangeMessageLength = 0;
+        
+                        if( middleDistancePlayerIDs.size() > 0 ) {
+                            SimpleVector<char> messageChars;
+            
+                            messageChars.appendElementString( "PO\n" );
+            
+                            for( int i=0; 
+                                 i<middleDistancePlayerIDs.size(); i++ ) {
+                                char buffer[20];
+                                sprintf( 
+                                    buffer, "%d\n",
+                                    middleDistancePlayerIDs.
+                                    getElementDirect( i ) );
+                                
+                                messageChars.appendElementString( buffer );
+                                }
+                            messageChars.push_back( '#' );
+
+                            char *outOfRangeMessageText = 
+                                messageChars.getElementString();
+
+                            outOfRangeMessageLength = 
+                                strlen( outOfRangeMessageText );
+
+                            if( outOfRangeMessageLength < 
+                                maxUncompressedSize ) {
+                                outOfRangeMessage = 
+                                    (unsigned char*)outOfRangeMessageText;
+                                }
+                            else {
+                                // compress 
+                                outOfRangeMessage = makeCompressedMessage( 
+                                    outOfRangeMessageText, 
+                                    outOfRangeMessageLength, 
+                                    &outOfRangeMessageLength );
+                
+                                delete [] outOfRangeMessageText;
+                                }
+                            }
                         
-                        // send short PO instead
                         int numSent = 
                             nextPlayer->sock->send( 
                                 outOfRangeMessage, 
                                 outOfRangeMessageLength, 
                                 false, false );
+                        
+                        nextPlayer->gotPartOfThisFrame = true;
+
+                        delete [] outOfRangeMessage;
 
                         if( numSent != outOfRangeMessageLength ) {
-                            setDeathReason( nextPlayer, "disconnected" );
-
-                            nextPlayer->error = true;
-                            nextPlayer->errorCauseString =
-                                "Socket write failed";
+                            setPlayerDisconnected( nextPlayer, 
+                                                   "Socket write failed" );
                             }
                         }
                     }
-                if( moveMessage != NULL ) {
+
+
+
+
+                if( moveList.size() > 0 && nextPlayer->connected ) {
                     
                     double minUpdateDist = 64;
                     
@@ -9766,22 +14376,65 @@ int main() {
 
                     if( minUpdateDist <= maxDist ) {
                         
-                        int numSent = 
-                            nextPlayer->sock->send( 
-                                moveMessage, 
-                                moveMessageLength, 
-                                false, false );
+                        SimpleVector<MoveRecord> closeMoves;
+                        
+                        for( int u=0; u<movesPos.size(); u++ ) {
+                            ChangePosition *p = movesPos.getElement( u );
+                            
+                            // move messages are never global
+                            
+                            double d = intDist( p->x, p->y, 
+                                                playerXD, playerYD );
+                    
+                            if( d > maxDist ) {
+                                continue;
+                                }
+                            closeMoves.push_back( 
+                                moveList.getElementDirect( u ) );
+                            }
+                        
+                        if( closeMoves.size() > 0 ) {
+                            
+                            char *moveMessageText = getMovesMessageFromList( 
+                                &closeMoves, nextPlayer->birthPos );
+                        
+                            unsigned char *moveMessage = NULL;
+                            int moveMessageLength = 0;
+        
+                            if( moveMessageText != NULL ) {
+                                moveMessage = (unsigned char*)moveMessageText;
+                                moveMessageLength = strlen( moveMessageText );
 
-                        if( numSent != moveMessageLength ) {
-                            setDeathReason( nextPlayer, "disconnected" );
+                                if( moveMessageLength > maxUncompressedSize ) {
+                                    moveMessage = makeCompressedMessage( 
+                                        moveMessageText,
+                                        moveMessageLength,
+                                        &moveMessageLength );
+                                    delete [] moveMessageText;
+                                    }    
+                                }
 
-                            nextPlayer->error = true;
-                            nextPlayer->errorCauseString =
-                                "Socket write failed";
+                            int numSent = 
+                                nextPlayer->sock->send( 
+                                    moveMessage, 
+                                    moveMessageLength, 
+                                    false, false );
+                            
+                            nextPlayer->gotPartOfThisFrame = true;
+                            
+                            delete [] moveMessage;
+                            
+                            if( numSent != moveMessageLength ) {
+                                setPlayerDisconnected( nextPlayer, 
+                                                       "Socket write failed" );
+                                }
                             }
                         }
                     }
-                if( mapChangeMessage != NULL ) {
+
+
+                
+                if( mapChanges.size() > 0 && nextPlayer->connected ) {
                     double minUpdateDist = 64;
                     
                     for( int u=0; u<mapChangesPos.size(); u++ ) {
@@ -9798,22 +14451,87 @@ int main() {
                         }
 
                     if( minUpdateDist <= maxDist ) {
-                        int numSent = 
-                            nextPlayer->sock->send( 
-                                mapChangeMessage, 
-                                mapChangeMessageLength, 
-                                false, false );
-                        
-                        if( numSent != mapChangeMessageLength ) {
-                            setDeathReason( nextPlayer, "disconnected" );
+                        // at least one thing in map change list is close
+                        // enough to this player
 
-                            nextPlayer->error = true;
-                            nextPlayer->errorCauseString =
-                                "Socket write failed";
+                        // format custom map change message for this player
+                        
+                        
+                        unsigned char *mapChangeMessage = NULL;
+                        int mapChangeMessageLength = 0;
+                        SimpleVector<char> mapChangeChars;
+
+                        for( int u=0; u<mapChanges.size(); u++ ) {
+                            ChangePosition *p = mapChangesPos.getElement( u );
+                        
+                            double d = intDist( p->x, p->y, 
+                                                playerXD, playerYD );
+                            
+                            if( d > maxDist ) {
+                                // skip this one, too far away
+                                continue;
+                                }
+                            MapChangeRecord *r = 
+                                mapChanges.getElement( u );
+                            
+                            char *lineString =
+                                getMapChangeLineString( 
+                                    r,
+                                    nextPlayer->birthPos.x,
+                                    nextPlayer->birthPos.y );
+                            
+                            mapChangeChars.appendElementString( lineString );
+                            delete [] lineString;
+                            }
+                        
+                        
+                        if( mapChangeChars.size() > 0 ) {
+                            mapChangeChars.push_back( '#' );
+                            char *temp = mapChangeChars.getElementString();
+
+                            char *mapChangeMessageText = 
+                                concatonate( "MX\n", temp );
+                            delete [] temp;
+
+                            mapChangeMessageLength = 
+                                strlen( mapChangeMessageText );
+            
+                            if( mapChangeMessageLength < 
+                                maxUncompressedSize ) {
+                                mapChangeMessage = 
+                                    (unsigned char*)mapChangeMessageText;
+                                }
+                            else {
+                                mapChangeMessage = makeCompressedMessage( 
+                                    mapChangeMessageText, 
+                                    mapChangeMessageLength, 
+                                    &mapChangeMessageLength );
+                
+                                delete [] mapChangeMessageText;
+                                }
+                            }
+
+                        
+                        if( mapChangeMessage != NULL ) {
+
+                            int numSent = 
+                                nextPlayer->sock->send( 
+                                    mapChangeMessage, 
+                                    mapChangeMessageLength, 
+                                    false, false );
+                            
+                            nextPlayer->gotPartOfThisFrame = true;
+                            
+                            delete [] mapChangeMessage;
+
+                            if( numSent != mapChangeMessageLength ) {
+                                setPlayerDisconnected( nextPlayer, 
+                                                       "Socket write failed" );
+                                }
                             }
                         }
                     }
-                if( speechMessage != NULL ) {
+                if( speechMessage != NULL && nextPlayer->connected ) {
                     double minUpdateDist = 64;
                     
                     for( int u=0; u<newSpeechPos.size(); u++ ) {
@@ -9836,65 +14554,204 @@ int main() {
                                 speechMessageLength, 
                                 false, false );
                         
+                        nextPlayer->gotPartOfThisFrame = true;
+                        
                         if( numSent != speechMessageLength ) {
-                            setDeathReason( nextPlayer, "disconnected" );
+                            setPlayerDisconnected( nextPlayer, 
+                                                   "Socket write failed" );
+                            }
+                        }
+                    }
 
-                            nextPlayer->error = true;
-                            nextPlayer->errorCauseString =
-                                "Socket write failed";
+
+                if( newLocationSpeech.size() > 0 && nextPlayer->connected ) {
+                    double minUpdateDist = 64;
+                    
+                    for( int u=0; u<newLocationSpeechPos.size(); u++ ) {
+                        ChangePosition *p = 
+                            newLocationSpeechPos.getElement( u );
+                        
+                        // locationSpeech never global
+
+                        double d = intDist( p->x, p->y, 
+                                            playerXD, playerYD );
+                        
+                        if( d < minUpdateDist ) {
+                            minUpdateDist = d;
+                            }
+                        }
+
+                    if( minUpdateDist <= maxDist ) {
+                        // some of location speech in range
+                        
+                        SimpleVector<char> working;
+                        
+                        working.appendElementString( "LS\n" );
+                        
+                        for( int u=0; u<newLocationSpeechPos.size(); u++ ) {
+                            ChangePosition *p = 
+                                newLocationSpeechPos.getElement( u );
+                            
+                            char *line = autoSprintf( 
+                                "%d %d %s\n",
+                                p->x - nextPlayer->birthPos.x, 
+                                p->y - nextPlayer->birthPos.y,
+                                newLocationSpeech.getElementDirect( u ) );
+                            working.appendElementString( line );
+                            
+                            delete [] line;
+                            }
+                        working.push_back( '#' );
+                        
+                        char *message = 
+                            working.getElementString();
+                        int len = working.size();
+                        
+
+                        if( len > maxUncompressedSize ) {
+                            int compLen = 0;
+                            
+                            unsigned char *compMessage = makeCompressedMessage( 
+                                message, 
+                                len, 
+                                &compLen );
+                
+                            delete [] message;
+                            len = compLen;
+                            message = (char*)compMessage;
+                            }
+
+                        int numSent = 
+                            nextPlayer->sock->send( 
+                                (unsigned char*)message,
+                                len, 
+                                false, false );
+                        
+                        delete [] message;
+                        
+                        nextPlayer->gotPartOfThisFrame = true;
+                        
+                        if( numSent != len ) {
+                            setPlayerDisconnected( nextPlayer, 
+                                                   "Socket write failed" );
                             }
                         }
                     }
                 
 
-                // EVERYONE gets updates about deleted players
-                if( deleteUpdateMessage != NULL ) {
-                    int numSent = 
-                        nextPlayer->sock->send( 
-                            deleteUpdateMessage, 
-                            deleteUpdateMessageLength, 
-                            false, false );
-                    
-                    if( numSent != deleteUpdateMessageLength ) {
-                        setDeathReason( nextPlayer, "disconnected" );
 
-                        nextPlayer->error = true;
-                        nextPlayer->errorCauseString =
-                            "Socket write failed";
+                // EVERYONE gets updates about deleted players                
+                if( nextPlayer->connected ) {
+                    
+                    unsigned char *deleteUpdateMessage = NULL;
+                    int deleteUpdateMessageLength = 0;
+        
+                    SimpleVector<char> deleteUpdateChars;
+                
+                    for( int u=0; u<newDeleteUpdates.size(); u++ ) {
+                    
+                        char *line = getUpdateLineFromRecord(
+                            newDeleteUpdates.getElement( u ),
+                            nextPlayer->birthPos );
+                    
+                        deleteUpdateChars.appendElementString( line );
+                    
+                        delete [] line;
+                        }
+                
+
+                    if( deleteUpdateChars.size() > 0 ) {
+                        deleteUpdateChars.push_back( '#' );
+                        char *temp = deleteUpdateChars.getElementString();
+                    
+                        char *deleteUpdateMessageText = 
+                            concatonate( "PU\n", temp );
+                        delete [] temp;
+                    
+                        deleteUpdateMessageLength = 
+                            strlen( deleteUpdateMessageText );
+
+                        if( deleteUpdateMessageLength < maxUncompressedSize ) {
+                            deleteUpdateMessage = 
+                                (unsigned char*)deleteUpdateMessageText;
+                            }
+                        else {
+                            // compress for all players once here
+                            deleteUpdateMessage = makeCompressedMessage( 
+                                deleteUpdateMessageText, 
+                                deleteUpdateMessageLength, 
+                                &deleteUpdateMessageLength );
+                
+                            delete [] deleteUpdateMessageText;
+                            }
+                        }
+
+                    if( deleteUpdateMessage != NULL ) {
+                        int numSent = 
+                            nextPlayer->sock->send( 
+                                deleteUpdateMessage, 
+                                deleteUpdateMessageLength, 
+                                false, false );
+                    
+                        nextPlayer->gotPartOfThisFrame = true;
+                    
+                        delete [] deleteUpdateMessage;
+                    
+                        if( numSent != deleteUpdateMessageLength ) {
+                            setPlayerDisconnected( nextPlayer, 
+                                                   "Socket write failed" );
+                            }
                         }
                     }
 
+
+
                 // EVERYONE gets lineage info for new babies
-                if( lineageMessage != NULL ) {
+                if( lineageMessage != NULL && nextPlayer->connected ) {
                     int numSent = 
                         nextPlayer->sock->send( 
                             lineageMessage, 
                             lineageMessageLength, 
                             false, false );
                     
+                    nextPlayer->gotPartOfThisFrame = true;
+                    
                     if( numSent != lineageMessageLength ) {
-                        setDeathReason( nextPlayer, "disconnected" );
+                        setPlayerDisconnected( nextPlayer, 
+                                               "Socket write failed" );
+                        }
+                    }
 
-                        nextPlayer->error = true;
-                        nextPlayer->errorCauseString =
-                            "Socket write failed";
+
+                // EVERYONE gets curse info for new babies
+                if( cursesMessage != NULL && nextPlayer->connected ) {
+                    int numSent = 
+                        nextPlayer->sock->send( 
+                            cursesMessage, 
+                            cursesMessageLength, 
+                            false, false );
+                    
+                    nextPlayer->gotPartOfThisFrame = true;
+                    
+                    if( numSent != cursesMessageLength ) {
+                        setPlayerDisconnected( nextPlayer, 
+                                               "Socket write failed" );
                         }
                     }
 
                 // EVERYONE gets newly-given names
-                if( namesMessage != NULL ) {
+                if( namesMessage != NULL && nextPlayer->connected ) {
                     int numSent = 
                         nextPlayer->sock->send( 
                             namesMessage, 
                             namesMessageLength, 
                             false, false );
                     
+                    nextPlayer->gotPartOfThisFrame = true;
+                    
                     if( numSent != namesMessageLength ) {
-                        setDeathReason( nextPlayer, "disconnected" );
-
-                        nextPlayer->error = true;
-                        nextPlayer->errorCauseString =
-                            "Socket write failed";
+                        setPlayerDisconnected( nextPlayer, 
+                                               "Socket write failed" );
                         }
                     }
 
@@ -9910,62 +14767,168 @@ int main() {
                         nextPlayer->foodStore = cap;
                         }
                     
-                    char *foodMessage = autoSprintf( 
-                        "FX\n"
-                        "%d %d %d %d %.2f %d\n"
-                        "#",
-                        nextPlayer->foodStore,
-                        cap,
-                        nextPlayer->lastAteID,
-                        nextPlayer->lastAteFillMax,
-                        computeMoveSpeed( nextPlayer ),
-                        nextPlayer->responsiblePlayerID );
+                    int yumMult = nextPlayer->yummyFoodChain.size() - 1;
+                    
+                    if( yumMult < 0 ) {
+                        yumMult = 0;
+                        }
+                    
+                    if( nextPlayer->connected ) {
+                        
+                        char *foodMessage = autoSprintf( 
+                            "FX\n"
+                            "%d %d %d %d %.2f %d "
+                            "%d %d\n"
+                            "#",
+                            nextPlayer->foodStore,
+                            cap,
+                            hideIDForClient( nextPlayer->lastAteID ),
+                            nextPlayer->lastAteFillMax,
+                            computeMoveSpeed( nextPlayer ),
+                            nextPlayer->responsiblePlayerID,
+                            nextPlayer->yummyBonusStore,
+                            yumMult );
+                        
+                        int messageLength = strlen( foodMessage );
+                        
+                        int numSent = 
+                            nextPlayer->sock->send( 
+                                (unsigned char*)foodMessage, 
+                                messageLength,
+                                false, false );
+                        
+                        nextPlayer->gotPartOfThisFrame = true;
+                        
+                        if( numSent != messageLength ) {
+                            setPlayerDisconnected( nextPlayer, 
+                                                   "Socket write failed" );
+                            }
+                        
+                        delete [] foodMessage;
+                        }
+                    
+                    nextPlayer->foodUpdate = false;
+                    nextPlayer->lastAteID = 0;
+                    nextPlayer->lastAteFillMax = 0;
+                    }
+
+
+
+                if( nextPlayer->heatUpdate && nextPlayer->connected ) {
+                    // send this player a heat status change
+                    
+                    char *heatMessage = autoSprintf( 
+                        "HX\n"
+                        "%.2f#",
+                        nextPlayer->heat );
                      
-                    int messageLength = strlen( foodMessage );
+                    int messageLength = strlen( heatMessage );
                     
                     int numSent = 
                          nextPlayer->sock->send( 
-                             (unsigned char*)foodMessage, 
+                             (unsigned char*)heatMessage, 
+                             messageLength,
+                             false, false );
+                    
+                    nextPlayer->gotPartOfThisFrame = true;
+                    
+                    if( numSent != messageLength ) {
+                        setPlayerDisconnected( nextPlayer, 
+                                               "Socket write failed" );
+                        }
+                    
+                    delete [] heatMessage;
+                    }
+                nextPlayer->heatUpdate = false;
+                    
+
+                if( nextPlayer->curseTokenUpdate &&
+                    nextPlayer->connected ) {
+                    // send this player a curse token status change
+                    
+                    char *tokenMessage = autoSprintf( 
+                        "CX\n"
+                        "%d#",
+                        nextPlayer->curseTokenCount );
+                     
+                    int messageLength = strlen( tokenMessage );
+                    
+                    int numSent = 
+                         nextPlayer->sock->send( 
+                             (unsigned char*)tokenMessage, 
                              messageLength,
                              false, false );
 
-                     if( numSent != messageLength ) {
-                         setDeathReason( nextPlayer, "disconnected" );
-
-                         nextPlayer->error = true;
-                         nextPlayer->errorCauseString =
-                             "Socket write failed";
-                         }
-                     
-                     delete [] foodMessage;
-                     
-                     nextPlayer->foodUpdate = false;
-                     nextPlayer->lastAteID = 0;
-                     nextPlayer->lastAteFillMax = 0;
+                    nextPlayer->gotPartOfThisFrame = true;
+                    
+                    if( numSent != messageLength ) {
+                        setPlayerDisconnected( nextPlayer, 
+                                               "Socket write failed" );
+                        }
+                    
+                    delete [] tokenMessage;                    
                     }
+                nextPlayer->curseTokenUpdate = false;
+
                 }
             }
 
-        if( moveMessage != NULL ) {
-            delete [] moveMessage;
+
+        for( int u=0; u<moveList.size(); u++ ) {
+            MoveRecord *r = moveList.getElement( u );
+            delete [] r->formatString;
             }
-        if( updateMessage != NULL ) {
-            delete [] updateMessage;
+
+
+
+        for( int u=0; u<mapChanges.size(); u++ ) {
+            MapChangeRecord *r = mapChanges.getElement( u );
+            delete [] r->formatString;
             }
-        if( outOfRangeMessage != NULL ) {
-            delete [] outOfRangeMessage;
+
+        if( newUpdates.size() > 0 ) {
+            
+            SimpleVector<char> playerList;
+            
+            for( int i=0; i<playersReceivingPlayerUpdate.size(); i++ ) {
+                char *playerString = 
+                    autoSprintf( 
+                        "%d, ",
+                        playersReceivingPlayerUpdate.getElementDirect( i ) );
+                playerList.appendElementString( playerString );
+                delete [] playerString;
+                }
+            
+            char *playerListString = playerList.getElementString();
+
+            AppLog::infoF( "%d/%d players were sent part of a %d-line PU: %s",
+                           playersReceivingPlayerUpdate.size(),
+                           numLive, newUpdates.size(),
+                           playerListString );
+            
+            delete [] playerListString;
             }
-        if( mapChangeMessage != NULL ) {
-            delete [] mapChangeMessage;
+        
+
+        for( int u=0; u<newUpdates.size(); u++ ) {
+            UpdateRecord *r = newUpdates.getElement( u );
+            delete [] r->formatString;
             }
+        
+        for( int u=0; u<newDeleteUpdates.size(); u++ ) {
+            UpdateRecord *r = newDeleteUpdates.getElement( u );
+            delete [] r->formatString;
+            }
+
+        
         if( speechMessage != NULL ) {
             delete [] speechMessage;
             }
-        if( deleteUpdateMessage != NULL ) {
-            delete [] deleteUpdateMessage;
-            }
         if( lineageMessage != NULL ) {
             delete [] lineageMessage;
+            }
+        if( cursesMessage != NULL ) {
+            delete [] cursesMessage;
             }
         if( namesMessage != NULL ) {
             delete [] namesMessage;
@@ -9973,6 +14936,44 @@ int main() {
         if( dyingMessage != NULL ) {
             delete [] dyingMessage;
             }
+        if( healingMessage != NULL ) {
+            delete [] healingMessage;
+            }
+        if( emotMessage != NULL ) {
+            delete [] emotMessage;
+            }
+        
+        
+        // this one is global, so we must clear it every loop
+        newSpeech.deleteAll();
+        newSpeechPos.deleteAll();
+        
+        newLocationSpeech.deallocateStringElements();
+        newLocationSpeechPos.deleteAll();
+        
+
+        
+        // handle end-of-frame for all players that need it
+        const char *frameMessage = "FM\n#";
+        int frameMessageLength = strlen( frameMessage );
+        
+        for( int i=0; i<players.size(); i++ ) {
+            LiveObject *nextPlayer = players.getElement(i);
+            
+            if( nextPlayer->gotPartOfThisFrame && nextPlayer->connected ) {
+                int numSent = 
+                    nextPlayer->sock->send( 
+                        (unsigned char*)frameMessage, 
+                        frameMessageLength,
+                        false, false );
+
+                if( numSent != frameMessageLength ) {
+                    setPlayerDisconnected( nextPlayer, "Socket write failed" );
+                    }
+                }
+            nextPlayer->gotPartOfThisFrame = false;
+            }
+        
 
         
         // handle closing any that have an error
@@ -9988,6 +14989,7 @@ int main() {
                 AppLog::infoF( "%d remaining player(s) alive on server ",
                                players.size() - 1 );
 
+                sockPoll.removeSocket( nextPlayer->sock );
                 
                 delete nextPlayer->sock;
                 delete nextPlayer->sockBuffer;
@@ -9996,22 +14998,12 @@ int main() {
                 if( nextPlayer->name != NULL ) {
                     delete [] nextPlayer->name;
                     }
-                
-                if( nextPlayer->containedIDs != NULL ) {
-                    delete [] nextPlayer->containedIDs;
-                    }
-                
-                if( nextPlayer->containedEtaDecays != NULL ) {
-                    delete [] nextPlayer->containedEtaDecays;
-                    }
 
-                if( nextPlayer->subContainedIDs != NULL ) {
-                    delete [] nextPlayer->subContainedIDs;
+                if( nextPlayer->lastSay != NULL ) {
+                    delete [] nextPlayer->lastSay;
                     }
                 
-                if( nextPlayer->subContainedEtaDecays != NULL ) {
-                    delete [] nextPlayer->subContainedEtaDecays;
-                    }
+                freePlayerContainedArrays( nextPlayer );
                 
                 if( nextPlayer->pathToDest != NULL ) {
                     delete [] nextPlayer->pathToDest;
@@ -10019,6 +15011,10 @@ int main() {
 
                 if( nextPlayer->email != NULL ) {
                     delete [] nextPlayer->email;
+                    }
+
+                if( nextPlayer->murderPerpEmail != NULL ) {
+                    delete [] nextPlayer->murderPerpEmail;
                     }
 
                 if( nextPlayer->deathReason != NULL ) {
@@ -10043,6 +15039,14 @@ int main() {
             }
         }
     
+    // stop listening on server socket immediately, before running
+    // cleanup steps.  Cleanup may take a while, and we don't want to leave
+    // server socket listening, because it will answer reflector and player
+    // connection requests but then just hang there.
+
+    // Closing the server socket makes these connection requests fail
+    // instantly (instead of relying on client timeouts).
+    delete server;
 
     quitCleanup();
     
@@ -10060,6 +15064,14 @@ int main() {
 
 void *getSprite( int ) {
     return NULL;
+    }
+
+char *getSpriteTag( int ) {
+    return NULL;
+    }
+
+char isSpriteBankLoaded() {
+    return false;
     }
 
 char markSpriteLive( int ) {
@@ -10084,6 +15096,23 @@ float getTotalGlobalFade() {
 
 void toggleAdditiveTextureColoring( char inAdditive ) {
     }
+
+void toggleAdditiveBlend( char ) {
+    }
+
+void drawSquare( doublePair, double ) {
+    }
+
+void startAddingToStencil( char, char, float ) {
+    }
+
+void startDrawingThroughStencil( char ) {
+    }
+
+void stopStencil() {
+    }
+
+
 
 
 

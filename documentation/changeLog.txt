@@ -3,10 +3,2130 @@ This file only list changes to game code.  Changes to content can be found here:
 http://onehouronelife.com/updateLog.php
 
 
+
+Server Fixes
+
+--Fixed crash caused by wayward deletion of new sequence number string in twin
+  code.
+
+--Fixed clothing biome boundary dancing exploit (crossing boundary between
+  hot/cold biome will never make you more comfortable (closer to target middle
+  temp) than you were before crossing).  Clothing still reduces thermal shock
+  from crossing biome boundaries, but only if you are already closer to target
+  temp than thermal shock on other side of temp meter.  So if you are close to
+  perfect, wearing clothing will help a lot when you cross a biome boundary
+  from cold to hot.  If you are currently freezing (and in clothes), the
+  clothing won't help much when you cross into a hot biome to reduce shock.
+
+--Body heat now only applies in cold environments, so it won't cause
+  overheating when wearing clothes in hot environments (clothes slow how fast
+  you heat up in the hot environment, but don't hurt you by making you even
+  hotter after you acclimate).
+
+
+
+Version 199     2019-February-15
+
+--Scene editor allows copy/paste of area containing floor and people.
+
+--Updated tutorial to explain new heat system.
+
+
+
+
+Version 198     2019-February-9
+
+--Client preparing for furture protocol change where SN message contains an
+  opaque string (including a random nonce) instead of a number.
+
+--Home markers, which are invalid after flight, are cleared.
+
+--/NET command to display network load stats in client.
+
+--/FPS and /NET commands now show history graphs (last 100 seconds).
+
+--FINALLY fixed a lurking source of client network lag, caused by the way that
+  message frame batches were processed (while processing messages that are part
+  of a frame, no message was processed, even if the entire frame was available,
+  meaning that the number of display frames spent processing a message frame
+  grows relative to the number of messages in the frame.  As frame rate drops
+  on slower computers, this causes a message backlog to build up, especially in
+  busy areas where there are lots of things happening every message frame.  We
+  now process all available messages while we're waiting for the end of a frame
+  to arrive.  Thanks to jrudolf for pinpointing the cause of this issue.
+  Fixes #125
+
+
+
+
+
+Server Fixes
+
+--Paginated lineage server log listing.
+
+--Lineage log has index for faster display.  Better logging.
+
+--Whoops!  New server setup script was not putting serverID in right location.
+
+--Download page lets you change your own email.
+
+--Min-distance-at-speed for takeoff reduced to 2 (was 4) to make take-off
+  easier.
+
+--Made take-off at end of road explicit, so that you always go all the way to
+  the end in one direction before taking off.
+
+--Basket swap in a larger container wasn't working if both baskets contained
+  same number of items.  Fixes #217
+
+--Reflector fixed to update OFFLINE status of servers every 20 seconds, even
+  when report isn't being loaded (before, only report would trigger an update
+  to OFFLINE status of a server).
+
+--Nearby landing pads no longer block eachother.  Instead, when taking off, we
+  search for some pad in the chosen direction that is at least 250 away in
+  either x or y.
+
+--Partially-used objects are not restored to stale parts of map.  Fixes #206
+
+--Server must update birth location of flying player to ensure that coordinates
+  remain in low range to avoid GPU rounding errors (i.e., in case where player
+  flies out to tutorial at coordinate x=10M).
+
+--Players that were out of range before flight may come in range after flight.
+  Server now sends a complete server-wide PU to flying player (the same as when
+  player first connects), updated with new birth location (landing location).
+
+--Calculating distance-squared when finding closest flight landing position now
+  double precision (using ints isn't going to work for distances above about
+  50K.
+
+--Better logging of maxPlacementX and flights.
+
+--Heat overhaul:  R values stack multiplicatively, not additively.
+
+--Heat overhaul:  Separate fixed heat map produced by underlying biome
+  (biomes no longer generate or absorb heat each step).
+
+--Heat overhaul:  Biome temperature serves as starting air heat value for each
+  cell in the simulation grid.
+
+--Heat overhaul:  Floor insulates between air and underlying biome.
+
+--Heat overhaul:  Air itself has a small R value to slow base propagation
+  per sim step.
+
+--Heat overhaul:  Biome temperature fixed at edge of simulation grid, instead
+  of having a fixed 0.00 temperature sink at edge.
+
+--Heat overhaul:  Heat produced by clothing (not currently used) summed as a
+  separate step at the end, and doesn't count as a heat source in the 
+  environmental simulation grid.
+
+--Heat overhaul:  Player clothing simulated as separate step at the end, after
+  simulating environmental propagation grid.
+
+--Problem:  if tutorial is always placed at 2x max birth location, then if
+  people fly to the tutorial and have a baby there repeatedly, the tutorial
+  location grows exponentially.  Saw 10M, 20M, 40M, 80M, 160M, 320M in server
+  log as people continued flying to tutorial and having babies there.  It will
+  quickly overflow.  Now it is max birth location +400,000, so it grows
+  linearly if people fly there and have babies there.  People can "chase" the
+  tutorial area 5000 times before we need to worry about overflow.
+
+--Fixed additional int overflows in server distance functions by switching to
+  double precision.  This was potentially causing distant map changes to be
+  sent to a player unecessarily, eating up bandwidth.
+
+--Heat overhaul:  Player clothing now modulates how fast player body
+  temperature moves toward surrounding temperature.
+
+--Server implementation of SN protocol change, where we have a non-repeating
+  nonce based on a server-side secret, instead of a simple sequence number.
+  This fixes a potential security hole where private servers can harvest
+  sequence-number/hash pairs and replay them to log into the real server as
+  that player.
+
+--Heat overhaul:  replaced simulation of cellular atomata heat grid with even
+  heat spreading over enclosed airspace via convection and direct radiant heat
+  based on distance from each heat source in airspace.  Still using 8x8 grid to
+  measure airspace, which might fall short in larger buildings, but still feels
+  much more intuitive than old system.  Biome heat contribution is also added
+  int from player's position as a final step, so there's no biome boundary
+  blending. 
+
+--Heat overhaul:  moving to a temperature-affecting biome that is on the
+  opposite side of "perfect" from you results in an instantaneous temperature
+  shock, jumping to that side of the temp meter instead of tweening there
+  through perfect.  This makes biome-boundary-dancing ineffective.  This
+  effect is modulated by clothing though (it reduces the shock of stepping
+  into the arctic or desert).
+
+--Heat overhaul:  changed the mechanisms of fever.  Instead of heat produced by
+  a held object (same as holding a hot coal or whatever), where it would be
+  modulated by clothing R value (or in the old system, contained by it), heat
+  from fever is a separate quantity that gets added in after all head
+  computations for player.  Thermal shock reduction, based on clothing, is
+  also disabled when you have a fever (so there's no punishment for wearing
+  clothes when you head to the snow to cool the fever off).
+
+
+
+
+
+Version 195     2019-January-31
+
+--Changed projection for drawn mouse pointer (to further fix behavior on
+  ultrawidescreen).
+
+--Tutorial draws attention to vertical doors, which are hard to see.  Tutorial
+  intro explains time commitment and gives death warning.  More explanation of
+  YUM and MEH.
+
+--Editor supports baking sprites that include color-adjusted sprite layers.
+
+--Support for long-distance flying.
+
+
+
+Server Fixes
+
+--Reflector changed so that server assignment is not sticky for a given email
+  address.  Each new life is a random re-roll among available servers.
+
+--Added birth location offsets to AM receiver message positions.
+
+--Reflector fixed so that offline servers aren't counted when summing current
+  active server totals.
+
+--Reflector now picks from weighted distribution of actually-alive set of
+  servers, if some of the servers in the active set are offline.  Last-ditch
+  effort code added to find SOME server for the player, if the weighted picking
+  fails for whatever reason.
+
+--Optimization: Don't need to do select at all on receive if timeout 0
+  (using MSG_DONTWAIT anyway).  select was found to be a hotspot with profiler.
+
+--Optimization: Profiler found 26% of non-idle time spent recomputing heat
+  maps.  We were taking another step through list of players each time new
+  messages arrived, meaning that we were looping through them faster and faster
+  during busy times (in one estimate, processing heat maps for 130 players
+  every second).  Now we process them at a fixed max rate, regardless of
+  incoming message rate, of 2 players every 0.1 seconds (20 players per second
+  during active times).
+
+--Optimization: Exposed getMapObjectRaw externally so recomputeHeatMap can use
+   it to avoid wasting cycles checking for decaying objects.
+
+--Optimization: We were checking what each player was crossing every server
+  step (and server steps happen faster and faster as the inbound message rate
+  increases).  Fixed to only check what a player is crossing every 0.25 seconds.
+
+--Removed a wayward continue.
+
+--Optimization:  Don't check curse settings every stepCurses call.
+
+--Optimization:  Only execute certain non-reactive parts of server step loop
+  once every 0.25 seconds at most, not every loop (loop can run very fast when
+  a lot of messages are coming in.
+
+--Check in server code and cron job for read-only file system.
+
+--Recomputing heat map for 20 players per second was a little slow.  With 200
+  players, that means each player only gets their heat map updated every 10
+  seconds.  Upped it to 80 players per second (each player gets updated every
+  2.5 seconds when there are 200 players).  Also shrunk dimensions of heat map
+  from 10x10 down to 8x8 (64% of original size, thus lowering computation load).
+
+--A bunch of places in code were calling computePartialMoveSpot without
+  checking whether player is moving first.  This allows a stale move path to
+  get queried when player no longer moving (example:  flight destination
+  reached).
+
+
+
+
+Version 193     2019-January-17
+
+--Code for transmission of speech through speech pipe objects.
+
+
+
+
+Version 190     2019-January-11
+
+--Fixed so that client sends correct number of tokens for LOGIN with blank
+  email.  Thanks Andrew K.
+
+--Added support for global triggers (for radio transmission).
+
+
+
+
+Server Fixes
+
+--Whoops... new reflector code was still using 50/50 coin flips for spreading
+  servers, causing some players to fall of the end of the list and find no
+  server to connect to.  Fixes #191
+
+
+
+Version 188     2019-January-4
+
+--Fixed swap of baskets with different numbers of items in a larger container.
+  Fixes #184
+
+--Fixed tutorial wording to avoid confusion about Eve.  Fixes #185
+
+--Min age for default actions (open door, rouse bear) now 3.  Fixes #186
+
+--On reconnect, don't clear home markers unless we see a new player ID.
+  Fixes #188
+
+--/DIE command no longer blocks crafting hints for DIE when older than 2.
+  Fixes #189
+
+--Tutorial button on main menu page (appears after you beat tutorial).
+  Fixes #190
+
+
+
+
+Version 187     2019-January-3
+
+--Snowball splat face emote fixed.  Forgot to commit the emotionObjects.ini
+  settings file.  Fixes #177
+
+--No more jaundice glitch on hat or apron.  Fixes #172
+
+
+
+
+Server Fixes
+
+--Improved reflector code to spread players evenly amoung active servers
+  (thanks CrazyEddie).  Fixes #171
+
+--Wounds, like animal bites, can now replace sickness (though effects of
+  sickness are not eliminated until wound is fully healed).  Fixes #162
+
+--Missing global variable in curse server.
+
+--Fixed so that forced-drop when moving (when attacked by animal) drops
+  relative to current position and not destination.  Fixes #165
+
+--Fixed so that locks/keys don't revert to ? state when they reside in a
+  container during server shutdown.  Fixes #180
+
+
+
+
+Version 185     2018-December-27
+
+--Survivable apocalypse (full map wipe while players are still alive) that
+  doesn't spread to other servers.
+
+--Eve old-age death-location respawn blocked if there are 4 or more fertile
+  females on server.  That is supposed to be a solo-play mechanic.
+
+--Whoa!  Huge bug in Eve death location for Eve respawn.  Was not actually
+  using her death location, but instead the weighted average of recent
+  placements on the map.  This would make her respawn in some other
+  more-developed village later, which is why there was so much player
+  confusion around this mechanic.
+
+--Again, whoa!  Huge bug in temperature-based weighting for mother fertility.
+  Was using abs instead of fabs in formula, resulting in all mothers having the
+  same weight, regardless of temperature.
+
+--Added yum-multiplier component to fertility weighting (having the highest yum
+  multiplier on the server is equivalent in weight to having a perfect-middle
+  temperature, and having both results in double weight---warm mothers who are
+  eating a variety of foods will be much more likely to have babies than cold
+  mono-diet mothers).
+
+--Fixed other places in code where abs was used instead of fabs.  These were
+  likely not causing bugs.
+
+--Fixed bug in server code where apocalypse setting blocked monument triggers.
+
+
+
+
+
+Version 183     2018-December-20
+
+--Whoops... various headless helper apps failed to compile.  Fixed.
+
+--Added /FPS command in client to toggle FPS display while living a life.
+
+--Added /PING command in client for measuring round-trip latency to server.
+
+--Support for additive blend on sprite layers (candle glow).
+
+--When searching for a matching body part, now search top-down instead of
+  bottom-up (one new character has two sets of eyes in old age, and we want to
+  find the top ones).
+
+--On inserting one object into another in editor, default to bottom layer of
+  inserted object as picked layer.
+
+--Support for head layer of emote (on top of everything, like a hat).
+
+--Copy Child Chain in animation editor now copies entire child tree.
+
+--Added version of child tree copy button that randomizes phases.
+
+--More improvements to crafting hint filters.  Don't show transition matches
+  that produce a precursor as an unlisted side-effect (for example, making a
+  shoe leaves a needle in your hand, but this is irrelevant if you're trying to
+  craft something that has a needle as a precursor).  Don't limit shown
+  transition based on depth of current object.  Instead, cut off precursor
+  chain search from filter target if chain passes through current object.
+  This allows us to see that we need to put two pieces of cut rabbit fur
+  together to make four in order to make bellows (even though four pieces is
+  shallower in the crafting tree than two pieces).
+
+
+
+
+
+Server Fixes
+
+--AllowedEmotRange server-side to block clients from manually requesting
+  jaundice emot.  Related to #170.
+
+--Fixed bug in computing decay time for wound.
+
+--Improved semantics of wound-and-weapon transitions in terms of how they
+  affect what's left in the hand of the perpetrator (wound transition can now
+  specify a held-weapon change if no other trans is present).
+
+
+
+
+Version 181     2018-December-13
+
+--noFlip object property now affects object drawing deeply, even when object is
+  contained in a flipped container.
+
+--Fixed so that face portion of emot (e.g., yellow fever face) can be drawn
+  even if player doesn't currently have a sprite called Eyes (e.g., when they
+  are a crying baby).  Fixes #145
+
+--Mouse-over highlights now shown when mousing over worn clothing.  Fixes #146
+
+--Animation editor allows fade osc of 8 hz max (was 6).
+
+--Animation editor can now copy animation from one object to another with
+  right-click even if they are not exact sprite matches, as long as the source
+  object is a subset of the target object.
+
+--Animation editor allows all osc of 8 hz max (was 6).
+
+--Added field that allows applying speed multiplier to entire animation.
+
+--Rideable objects can have sprites layers that are drawn behind player.
+
+--Fixed so that objects that are drawn in separate layers are not time updated
+  twice per frame.
+
+--Fixed issue with game waiting for newly-launched web browser on Linux.
+
+
+
+
+Server Fixes
+
+--randSource for probability transitions (fishing and oil) now seeded with time
+  instead of fixed seed, so that repeated short-run server testing allows me to
+  get a feel for a given probability distribution.
+
+
+
+Version 177     2018-November-30
+
+--Better client behavior in case of real, 2-way connection break with server.
+  If we haven't heard anything from server for 10+ seconds, and our action has
+  been pending for 5+ seconds (bouncing), then declare connection broken.  Old
+  behavior caused it to wait until receiving some kind of message from server
+  before attempting PING/PONG, so it would wait forever if connection was truly
+  broken.  Note that a truly, truly broken connection would eventually be
+  detected in the network layer, but this can take a long time.  We still need
+  to deal with 'soft breaks' in a sensible way.
+
+--Improved a bunch of little rough edges in the tutorial.  The camera-freezing
+  section is now much more clear and fool-proof.  There are multiple warnings
+  about the last optional area NOT helping you to pass the tutorial (at least
+  two recent Steam reviewers got stuck trying to forge an axe, thinking that
+  was required).
+
+--Finally fixed glitch that causes other player's head to be behind the object
+  in the tile to the north of them (move truncation bug).
+ 
+
+
+
+Server Fixes
+
+--Server now clears any objects with names that start with @ at startup
+  (hotfix for wayward pile category objects in map).
+
+--Fixed so that items contained in baby clothing aren't lost when baby /DIEs.
+  Fixes #141
+
+
+
+
+Version 174     2018-November-29
+
+--Fixed overlaps in UI of scene editor.
+
+--Scene editor move timing now based on frame count instead of wall-clock time,
+  so move timing is perfect even when running slower (like when outputting
+  frames).
+
+--SpriteTrim editor now supports freehand trim.
+
+--Huge improvement to mouse interface:  when clicking a non-permanent object
+  (that can be picked up), where a bare-hand action also applies, left/right
+  buttons now differentiate.  Left to pick up, and right to execute the
+  bare-hand action.  This allows single-object stacks (like tortillas, sliced
+  bread, plates) to be be picked up (left click) or have the top item removed
+  (right click). Fixes jasonrohrer/OneLifeData7#53
+
+--Fixed edge case of sprite subset detection when zero layers don't match
+  (fixes shaft creation sound playing when two long shafts are pulled apart).
+
+
+
+Server Fixes
+
+--Shrank next Eve jump to 250, down from 500.  Smaller Eve spiral, more likely
+  to be interaction between villages.
+
+--Server skips sending apocalypse check to reflector if apocalypse disabled
+  locally.
+
+--Fixed so that yellow fever doesn't heal wounds (nor does one kind of animal
+  wound replace another).  Fixes #142.
+
+
+
+Version 172     2018-November-22
+
+--Client version checking logic fixed to handle case where server binary
+  version is behind our binary version, but ahead of our data version number.
+
+--Support for drawn (emulated) mouse pointer on ultrawide displays to overcome
+  mouse coordinate skew.  Drawn cursors can also be scaled by end-user, to
+  further help people in high-res or low-vision situations where the native
+  SDL pointer (even the 32x32 bigPointer) is too small.  See SETTINGS screen.
+
+--FAMILY TREE button on Menu screen that launches a browser to show your
+  personal recent lives.
+
+
+
+
+Server Fixes
+
+--Reduced timeouts in reflector from 6 seconds total down to 0.25 seconds total
+ (24x shorter) to reduce the likelihood of 504 gateway meltdown when one server
+ stops responding.
+
+--Don't live track decays for objects added via mapDummyRecall tracking on
+  startup.  There were close to 200,000 moving animals on the map that were
+  getting tracked when server1 and server2 started up.
+
+--Skip tracking map changes during initial map cleaning.  Avoids activating
+  motion on escaped horse carts (when they get cleaned as containers).
+
+--Avoid re-adding contained and sub-contained objects if nothing has changed
+  during map cleaning.
+
+--Fixed busy wait on server when a ticket server request fails but doesn't
+  close properly.
+
+--Lineage server now supports filtering by email hash (so we can trigger
+  searches by straight GET to a URL without revealing the user's email in the
+  address bar).
+
+--Diseases like Yellow Fever no longer compound to shorten death-stagger-time
+  from a multi-bite.  Instead, there is no death stagger time for a disease,
+  and if you recover before dying from the side effects, you always survive. 
+  However, getting bitten again while sick will still extend your sickness time.
+
+
+
+
+Steam Depot Hotfix
+
+--Gave a bunch of settings files the userconfig Steam attribute.  Should fix
+  the bug where some people need to redo the tutorial after every Steam update.
+
+
+
+
+Version 169    2018-November-18
+
+--Emergency hotfix.  We need to be able to update the client ahead of the
+  server without version mismatch.
+
+
+
+
+Version 168    2018-November-18
+
+--Fixed bug that could result in spurious, false wild bug reports.  After
+  pinging once, and getting a PONG back, we could mistakenly believe that we
+  had received PONGs to future PINGs.
+
+--Fixed glitch in radio button set (example:  twin count selection) where
+  dragging could select more than one choice or no choices.
+
+--Fixed memory leak when filtering crafting hints.
+
+--Huge improvement to behavior of / crafting filters.  Hides all hints when
+  none relevant, to avoid confusion.  Avoids showing recipes that use the
+  desired object as an ingredient.  A bunch of other tweaks that just make the
+  results more sensible and better.
+
+--Hunger and tutorial chimes now obey SETTINGS sound volume slider.
+
+--Fixed editor to handle baking of rotated non-square sprites correctly.
+
+--Support for emots that have a face and body component.
+
+--Emot protocol supports server setting optional emot ttl.
+
+--Dying protocol supports optional sick flag (so blood not displayed on client).
+
+--Highlight square a bit larger to contain top of rubber tree.
+
+
+
+
+Server Fixes
+
+--Fixed a memory leak when MOVE received while waiting for FORCE-ACK.
+
+--Fixed a memory leak when swapping clothing.
+
+--Fixed server crash when tutorial-twin players reconnect.
+
+--checkIfServerRunning cronjob also makes sure server has sufficient disk
+  space, and shuts it down gracefully if not.
+
+--Caching of generated PHP from index.php for 2 minutes to reduce CPU load on
+  web server.
+
+--Hourly generation of failure report was a huge CPU hog (100% CPU for 5
+  minutes straight).  No longer computing entire month (just past two days).
+
+--Fixed server crash from held baby/adult mismatch.
+
+--Server can read emot and food tags from wound description to trigger side
+  effects of wound (an emot that goes along with it, or a modification to food
+  capacity).
+
+
+
+Version 167    2018-November-9
+
+--Whoops... Game-breaking windows networking bug.
+
+
+
+
+Version 166    2018-November-9
+
+--Made it harder for Steam users to edit their account details by accident.
+
+
+
+
+Server Fixes
+
+--Improved robustness of networking code.  Have seen two server crashes due to
+  corrupted socket handles being passed into FD_SET.  Not sure where the
+  corruption is coming from, but added a check to ensure handle passed into
+  FD_SET is well-formed, and bug report outputting code when it's not.  No
+  longer storing socket handles on the heap, which should also help.
+
+
+
+Version 165    2018-November-8
+
+--Tore out the code that always shows the dotted line when held-mouse journey
+  pathing.  Not satisfied with how it looks, and hopefully other solutions will
+  emerge.
+
+--Releasing mouse on held-mouse journey now makes you stop exactly where your
+  character is standing upon release.
+
+--Fixed the way other clients handle PU that is not at end of current path.
+  Now correctly truncates current path so that character walks to that point.
+
+
+
+
+Version 163    2018-November-7
+
+--Holding SPACE freezes camera on the current map area.  Useful when moving
+  back and forth between a small group of nearby objects (like when forging) so
+  that you can click things more quickly and precisely (camera movement
+  interferes with your efforts to position the mouse).
+
+--Now showing dotted lines and X on path destination any time we're in
+  held-mouse long-travel mode, even if the path is in a straight line with no
+  detours.  This allows the user to predict and understand the behavior.
+
+--Fixed issue with auto-clicking during held-mouse travel when auto-click lands
+  on top of a tall object (was finding closest cell at base of tall object,
+  causing path to veer off course).
+
+--Moved biome tiles down and over by 32 pixels so that they line up with
+  actual tile boundaries.
+
+--Added special case logic that makes you stand behind a berry bush (or other
+  permanent, non-blocking food source) when you walk to it from far away.  This
+  makes clicking and eating multiple berries easier, becasue your character is
+  closer.
+
+--We only ignore clicks when holding speed-0 object if there's no bare-ground
+  transition (fixes getting stuck with horsebitten snake).
+  Fixes #117,  Fixes #102
+
+--Support for forced creation sounds that always play, even if other
+  same-trigger sounds are going to play in parallel (tipped horse cart sound
+  can play at same time as biting snake sound).
+
+--Allow baby to send JUMP messages every five seconds, instead of just once.
+  Fixes #112.  Fixed baby wiggle direction when mother facing left.
+
+--Don't use DROP message when clicking on self unless actually clicked on
+  clothing.  Fixes #98
+
+--Fixed shoes of rider appearing at (0,0) in world.
+  Fixes jasonrohrer/OneLifeData7#50
+
+--Moved some overlapping text up in transition editor.
+
+
+
+
+Server Fixes
+
+--Bring center of Eve spiral back to 0,0 whenver either x or y exceeds 100,000.
+  Thus, coordinates won't keep growing boundlessly.
+
+--Fixed an invalid read when generating death update for player who died of old
+  age.
+
+--Right-clicking an empty basket (or other non-permanent container) now picks
+  it up (to make it consistent with loose right-click semantics for other
+  objects).
+
+--Right-clicking object on its potential stack-mate (e.g., stone on stone) now
+  starts a new stack.  Feels like a "drop".
+
+--Right clicking on a basket stack with a basket adds the basket to the stack
+  (feels like a drop).
+
+--Right clicking basket stack with bare hand removes basket.
+
+--Fixed disappearing ground object when baby issues /die command.  Fixes #121
+
+--Change to deadly on-ground object wasn't happening when riding over (example:
+  snake goes into attacking posture).
+
+--Fixed wound-healing exploit where stab wound would replace snake bite.  Now
+  your first wound is the one that sticks with you and must be healed to save
+  you.  Each additional wound still halves your death stagger time, though.
+  Fixes #104.
+
+--Support for groundOnly tag in object description to prevent object from being
+  created on a floor.
+
+--Fixed case where non-permanent held object (like goose) force-dropped
+  (through death/wounding), where a ground transition applies.  No more stuck
+  goose or piglet after a force-drop.
+
+
+
+
+
+
+Version 161    2018-November-2
+
+--New PING message that client can use to verify server is receiving messages.
+  Sent before deciding whether to report a bouncing-forever bug.  At least some
+  of these are spuriously caused by connections that break in one direction
+  only.  It is only a true bug if we're receiving server responses to our
+  messages, but the expected response to our action was not received. 
+  PING/PONG lets us test this.
+
+--Scene Editor now displays saved scene number.
+
+--NO MATCH might be confusing.  Changed to NO FILTER MATCH.
+
+--Limited filter string to 23 characters to avoid going off end of notepad.
+
+--Support for new probability set cateogries, which allow transitions to
+  produce a weighted set of random outcome objects.
+
+--Fixed lack of sound played when use-on-bare-ground produces something on
+  ground that shouldn't make a sound, but what's left in hand should make a
+  sound (example:  tongs setting down ore should play tong creation sound).
+
+--Multiplicative sprite layers now supported when baking object down into one
+  sprite.  Only works if multiplicative layer does not overhang past edge of
+  opaque areas of object.
+
+--Was blindly using a returned internal vector while calling addTrans, which
+  meant that the internal vector would become invalidated due to expansion.
+  Unbelievable that this never caused a crash before now.
+
+--Client ignores mouse clicks if you are holding a 0-speed object.  Currently,
+  this is only used for fishing, while the line is in the water waiting.
+
+--Support for objects that are side-access only.  Made ice-hold side-access so
+  that fishing looks okay.
+
+
+
+
+Server Fixes
+
+--Server reports player's own id as killer id to lineage server in case of
+  /die, and lineage server displays Sudden Infant Death as cause of death.
+
+--Fixed lineage ban calcuation for /die babies and killers/victims.  Was
+  living extra time in other lines by accident.
+
+--Curse server now keeps people in Donkey Town for a fixed amount of time based
+  on the total number of curse points that they've earned in their lifetime as
+  a player.  First-time offenders are only kept there for 30 minutes.  The
+  worst repeat offenders will eventually be kept there for five hours every
+  time.
+
+--Fixed bug in way curse token status was being updated.
+
+--Finally fixed replacement of used objects and variable objects on server
+  restart.  Server now saves a mapDummyRecall file, and uses that to restore
+  the objects.  After server restart, partial stacks no longer become full,
+  berry bushes no longer replentish, and locks no longer become generic locks.
+
+--FINALLY fixed the sliding-penguin ice-hole proliferation bug.  Turns out that
+  it was triggered by a biome boundary.  The penguin would find the ice hole,
+  start transitioning to go into it, but then notice that it was across a biome
+  bondary, and thus forbidden, but still keep the 'in ice-hole' transition.
+
+--Fixed a bouncing-forever bug after reconnect.  If player is force-updated
+  while disconnected (like set down as a baby), then when they reconnect, the
+  server ignores their moves because they never sent their FORCE-ACK message.
+  Fixed this by no requiring FORCE-ACK for disconnected players.
+
+
+
+
+Version 160    2018-October-29
+
+--/die command to trigger sudden infant death.  Triggered by baby player, but
+  only when under 1 year old and currently held by mother.  Causes a lineage
+  ban for the baby and instant reset of birth cooldown for the mother.
+
+--Baby bones left in mother's arms after sudden infant death.
+
+--Pre-loading of all direct-from-death grave objects to avoid partial-sprite
+  pop-in.  Marked them all with fromDeath in description.
+
+--Fixed so that when trying to reconnect, client stops using twin code (was
+  already born as a twin before, so want to reconnect to that life).
+
+--Fixed display of incorrect pattern-based transitions in transition editor.
+
+
+
+Server Fixes
+
+--Fixed busy-wait server-side, due to instant SocketPoll response on
+  disconnected sockets, by removing them from Poll as soon as they disconnect.
+  This was causing 100% CPU.
+
+--Mother can only force-hold baby until age 1.
+
+--Fixed server crash when player reconnects but tries to join a twin game.
+
+
+
+
+Version 157    2018-October-26
+
+--Client handles disconnection with better messaging (no longer describes it as
+  death), and attempts reconnection when the user is ready.
+
+--Instant local response to jump-out-of-arms attempt (baby wiggles a bit).
+  This makes it feel much more responsive when you are perma-held by your own
+  mother and click.
+
+--Import editor now allows shift and ctrl for bigger jumps when paging through
+  past imports.  Line layer accumulation is no longer the default (rarely used,
+  and it was a pain to delete line layers when trying to page through).
+  Instead, holding A key triggers adding a line layer, but replace is default
+  when importing or paging through old imports.
+
+--Dramatic speed up in object bank load by not counting live sound uses and
+  expanding animation bank in batches of 100 instead of 1.  Result is 3.4x
+  overall speed up in object bank loading, and 16x speed up for used object
+  generation, and 2x speed up for variable object generation.  Was wondering
+  why server startup was so much faster than client startup---it was because it
+  has no animation bank, so dynamic object generation didn't require
+  duplication of animation bank records.
+
+
+
+Server Fixes
+
+--Server now keeps disconnected players alive instead of killing them, allowing
+  them to reconnect later and resume their life, assuming that they don't die
+  of in-game causes first.
+
+--Babies blocked from wiggling out of own mothers's arms until age 3.
+
+
+
+
+
+Steam-specific updates
+
+--Hide Post Review buttons on Steam version of client.
+
+--Shift-Tab to go back through hints doesn't work on Steam (shows overlay).
+  Z-tab instead.
+
+--steamGateClient now waits for game to exit (fixes Steam playtime tracking).
+
+
+
+Version 155    2018-October-19
+
+--Scene editor now displays behind-player sprite layers correctly.
+
+--Walls with container slots (sign walls) now drawn in front of other walls,
+  so signs not covered up.  Fixes #74
+
+--Lowered the minimum height for objects that are mouse-through-able (that
+  allow hidden objects behind to be clicked).  Fixes #82
+
+--Fixed double sound play when use-on-bare-ground produces something new in
+  hand and on ground (example:  unroping calf).
+
+--Support for displaying cursed player's excess curse score to them.
+
+--If we have a newer data version than the official servers, assume that
+  servers are in the process of updating, and display that message instead of
+  a confusing version missmatch message (Steam data update is pushed out before
+  the old-version Odd servers are shut down).
+
+--useSteamUpdate setting bypasses internal updater and displays QUIT message to
+  user with instructions.
+
+--Back to 10 seconds for wild bug reports.  5 is too short (sometimes there are
+  5+ second network delays).
+
+--Whoops... fix for multiple sounds playing failed to check for case when
+  target object doesn't change (exmaple: cooking over hot coals).
+  Fixes #67,  Fixes #68
+
+
+
+Server Fixes
+
+--Default bare-hand action doesn't apply when holding something if the target
+  object is a container (we want to insert item into container in that case).
+  Fixes #64
+
+--Use-on-bare-ground action automatically applies when swapping held with item
+  on ground, inserting held into container, or swapping held with container.
+  Bare-hand pickup-style action automatically applies when removing item from a
+  container or obtaining something new as the result of a swap.  This means
+  that wild piglets and goose, which are containable, but still supposed to go
+  through a transition when picked up or set down, do not get stuck in their
+  held state when swapped or put in a container.  Fixes #66
+
+--Fixed so that client EMOT requests are processed (just like SAY requests)
+  while a player is moving or while held as a baby.
+  Fixes jasonrohrer/OneLifeData7#23 
+
+--Held baby can now be used to open doors, trigger carts, etc.  Fixes #75
+
+--Improved logging around FORCE ack message failure.
+
+--Players born cursed in Donkey Town no longer get a cursed token to spend.
+
+
+
+Version 153    2018-October-12
+
+--FINALLY found an additional cause of the bouncing-forever bug (stale MOVE
+  messages from client that arrive at server after a forced-position PU has
+  been sent to the client).  Added a new FORCE ack protocol, where client
+  responds to the position forced by the server, and any intervening messages
+  received by the server are ignored.  This allows the client and the server
+  to get back in sync position-wise.
+
+****
+NOTE:  Rolling this out will require a special update process.
+    1.  Update servers to latest code, including the current 
+            requireClientForceAck.ini '0' setting.
+    2.  Update client.
+    3.  Check in requireClientForceAck.ini '1' setting for server.
+    4   Run remoteServerGitPull.sh
+--SPECIAL UPDATE PROCESS COMPLETE--
+****
+
+--Scene editor allows bigger jumps when paging through scenes.
+
+--Fixed another source of the bouncing-forever bug.  PU messages that end moves
+  weren't move-specific, so several moves that criss-crossed the same point
+  could all have ending PUs that end at the same spot.  With network latency,
+  an earlier PU could be misinterpreted as ending a later move, thus allowing a
+  post-move action to be sent to the server and ignored (because for the
+  server, the later move is still in-progress).  Fixed by adding a move
+  sequence number to the protocol, so we know which move a given PU is ending.
+
+--Related messages sent by server are now grouped by a FRAME message, so that
+  they can be held by client and played together.  So, for example, in cases of
+  packet delay, a pick up player result will not be displayed before the
+  corresponding map change client-side.  Testing with artificial variable
+  packet latency was showing all kinds of weird behavior client-side, and all
+  of this is fixed now.
+
+--Added reportWildBugToUser setting, so we can disable that easily for the
+  Steam release.
+
+--Wild bug, if there are any remaining causes of it, is now caught and cleared
+  (or reported) in 5 seconds (10 was a long time to bounce).
+
+--Fixed bug that was causing double-sound play when both target and held
+  changed.
+
+
+
+
+Server Fixes
+
+--The bit of code that was enabling teleporters was dealing with a very narrow
+  edge case (completely surrounded by blocking objects in all eight
+  directions), and it threw the item from your hand in order to free you up to
+  potentially open a door.  However, this code did not help at all in larger
+  rooms with full floors (you'd still get trapped, unable to open the door),
+  and teleportation was an unintended consequence of this code.  Fixed by
+  allowing held-objects to trigger bare-hand transitions if no other transition
+  applies.  This means you can now open a door when your hands are full, which
+  means that we don't need to worry about you getting trapped in a room by a
+  closed door when your hands are full, which means that the code that caused
+  teleporation can be removed entirely.  Sorry Tarr.  Fixes #58
+
+--Fixed so that default use-on-bare-ground action for a permanent held object
+  (example:  horse cart), when attempted on a tile that has a swappable object
+  in it, only is triggered with an explicit DROP action (right-click on
+  swappable object).  Last fix (so that you weren't trapped by objects that
+  fell out of your tipped horse cart) was triggered even by regular-click on
+  the swappable object, which resulted in you getting off the horse
+  unintentionally whenever you clicked on a swappable object.  Now you have to
+  right-click.
+
+--Fixed leak of absolute birth location through invalid held origin coordinates.
+
+--Got rid of deprecated MOVE-to-jump-out-of-arms semantics.  Now only a real
+  JUMP message will cause a baby to jump out, clearing up an ambiguity with
+  wayward MOVE messages while held, which caused a bouncing-forever bug.
+
+--When a map container shrinks and contents needs to be scattered, a search is
+  conducted in an infinite square spiral until an empty spot is found for each
+  previously-contained item.  This new scanning code is also much more efficent
+  (minimum number of map look-ups) compared to old expanding-radius code (which
+  stopped after radius 2, causing remaining items to vanish).  Fixes #62
+
+--findClosestEmptyMapSpot now uses same centralized spiral code.  Got rid of
+  code that merges graves (if someone standing on an existing grave when they
+  die).  Now a dead person always makes a new grave (if there is an empty spot
+  in a 100-step spiral around the place where they died).
+
+
+
+
+Version 151    2018-October-8
+
+--Loading Map process used to stall if a needed file was missing.  Now it
+  displays an error message to the user.  This will hopefully help with the
+  behavior described in jasonrohrer/OneLifeData7#22
+
+
+
+
+Server Fixes
+
+--New constant heat-map computing code was causing high CPU.  We were
+  recomputing heat maps for 10 players per steps, but a quick sample of
+  server1's logs showed 30 server steps per second with an 80-player load.
+  Thus, we were recomputing heat maps for 300 players per second, which is way
+  too frequently.  Turned setting down to 2 players updated per step, or 30 per
+  second (all 80 players updated over the course of three seconds, which is
+  fine).  Also eliminated extra heat map recomputation for players that are
+  receiving a player update message.
+
+--Held baby's temp matches position of moving holding adult.
+
+--Pattern code now applies to transitions that have only one pattern object, as
+  long as it's an actor or target in the transition.  The dog/puppy decay
+  patterns now work correctly.  Fixes jasonrohrer/OneLifeData7#20
+
+--Server setting forceAllPlayersEve.ini for improved control when testing.
+
+--Fixed bug where partially used objects would get flaged as writable
+  (allowing you to leave written messages on them).
+
+--Fixed case of being trapped while holding a permanent object (like a tipped
+  horse cart) and surrounded.  Any permanent held object that has a use-on-
+  bare-ground transition defined for dropping it can now be swapped with a
+  non-permanent object on the ground.
+
+
+
+Version 149    2018-October-5
+
+--Scene editor supports emotion displays.
+
+--Fixed so that clothing doesn't blush.
+
+--Fixed so that clicking face never accidently puts food in pocket of clothing,
+  even if clothing extends up under face.  Clicking face makes you eat (this
+  interaction was potentially very frustrating before, especially when young
+  and wearing an apron).
+
+--Major improvements to the heat system.  Now the heat simulation computes the
+  heat of the environment around you periodically, whether or not you are
+  walking around, and your personal temperature slowly advances toward this
+  environmental heat value.  No more sudden jumps in temperature.  It should
+  generally feel more intuitive than it used to.
+
+--Only past 20 recorded game files are kept by default, and rest are deleted,
+  freeing up disk space (put -1 in settings/keepPastRecordings.ini to keep them
+  all and override this new behavior).
+
+
+
+Server Fixes
+
+--Fixed glitch in long-line-position saving at server shutdown, where tutorial
+  players could potentially be treated as the longest line (thus putting the
+  next Eve spawn location way out by the tutorial).  Thanks Christoffer Baar.
+
+--Fixed server crash when player joins tutorial while there are no fertile
+  mothers around but young babies around.
+
+
+
+
+Version 147    2018-September-28
+
+--Moving categories up and down on a member object (to alter which category
+  takes precedence) was suppored in the editor, but not being saved to disk in
+  category bank.  Disabled this editor functionality for now (eventually, may
+  implement saving reverse category maps, with order, in the category bank, but
+   it's pretty complicated, and hasn't been needed so far.
+
+--Moving member objects up and down in a category IS actually useful (for
+  pattern categories, where order of members matter), and it's possible to save
+  this to disk in current category bank file structure, so added this
+  functionality to editor.
+
+--Finally fixed the root cause of the goose-stump and bear cave bug.  NSEW
+  moves used to be fixed distance (instead of variable, looking for a possible
+  space to land).  This is necessary for carts and other fixed-movment things.
+  However, all of those things move a single step NSEW.  So, in that case, we
+  shouldn't try moving farther if our move is blocked.  However, we can make
+  the goose and bear move 2 steps south, and then the code can treat them
+  differently (searching for a free space for them to move to).
+
+--More fixes for stump/cave bug.  Now any applicable transition is applied for
+  an object that is stuck and can't move, but was supposed to leave something
+  behind (bear-on-cave transition, or goose-on-stump transtion).  No more
+  disappearing stump or cave no matter what.
+
+--Support for new emot protocol and emotion display in client.
+
+
+
+Server Fixes
+
+--Fixed grave detection code so that Murder Grave is counted as a grave, so
+  you can't insert things into it.
+
+--Centralized curse-tracking server shared by all servers.  Getting cursed on
+  one server means you are cursed on all servers.
+
+--Fixed a potential crash if numContained in map set > 0, but contained ID is 0.
+
+--Fixed so that red-head race isn't a attractor point.  Any race with less than
+  four members automatically has babies in a neighboring race.  For now, until
+  there are more red-heads, the red-head will not have red-headded babies.
+
+--Old code that checked for whether you were surrouned by blocking objects
+  while holding something, which threw the object from your hand to give you a
+  chance to untrap yourself, did not handle permanent held objects, nor did it
+  account for diagonal walking when checking for surrounded status (only NSEW).
+  This is what enabled teleporters, and also a murder-weapon-dropping exploit.
+  This has all been fixed.  Teleportation will still happen, but only if you
+  are truly surrounded and not holding something permanent.
+
+
+
+
+
+Version 140    2018-September-17
+
+--Fixed bug in transition editor that was labeling produces trans as from
+  pattern by mistake.
+
+--Added second object picker to transition editor for convenience (can
+  juggle more than one search).
+
+--Patterns no longer can replace explicitly-authored transitions.
+
+
+
+Server Fixes
+
+--Fixed curse-note exploit (reading a written phrase aloud no longer has same
+  effect as speaking it yourself directly, for naming or cursing).
+
+
+
+Version 138    2018-September-14
+
+--Fixed bug in pattern transition generation.  Pattern should only apply if one
+  of actor or target have pattern apply (not in case where only newActor or
+  newTarget have pattern apply).  Example:  last puppy taken from German
+  Shepherd with Puppies makes a German Shepherd.  German Shepherd is a pattern,
+  but German Shepherd with Puppies is not.  Thus, we shouldn't generate a
+  [German Shepherd with Puppies] -> [Adult Dog] transition for each adult dog
+  in the German Shepherd pattern (the result is a single transition to an
+  adult Chihuaha, the last adult dog on the pattern list). 
+
+
+
+Server Fixes
+
+--Fixed a potential server crash when triplets or quadruplets start the
+  tutorial together.
+
+--Improved click UI when holding food.  Right-click on backpack swaps food
+  with bottom item in backpack.  Left-click puts food into backpack. 
+  Left-click self (not backpack) to consume food.  Same for other clothing
+  (like apron) with container slots.  This might make eating a bit harder in
+  some cases (when clothing with container slots covers most of your
+  character's body).
+
+--Curse timeout (when record discarded) increased from 48 to 96 hours.
+
+--Curse threshold (when you are born marked) lowered to 8 points.
+
+--Curse-marked players are now born into a distant location as an Eve or as the
+  baby of another curse-marked player.  Curse-marked players are exiled
+  together until they live-off their curse points.
+
+
+
+
+
+
+Version 137    2018-September-8
+
+--Fixed a new double-free bug that causes a potential crash on chat.  Thanks
+  Sophie Van L.
+
+
+
+
+Version 136    2018-September-7
+
+--Fixed scene editor animation speed of people holding speedMult objects.
+
+--Fixed handling of leading/trailing spaces when typing spoken text.  A hidden
+  leading space could spoil your baby naming phrase.  Thanks Jacek T.
+
+--Fixed a bouncing-forever bug that was caused by ambiguity of jump-out-of-arms
+  MOVE message (if messages are interleaved just right, the server can
+  interpret this MOVE as a real move instead of a jump-out-of-arms action).
+  Added new JUMP message to eliminate this ambiguity.  Thanks Jacek T.
+
+--Fixed a few major glitches in hold-mouse-to-keep-moving.  Thanks Jacek T.
+
+--Bouncing forever bug catcher now asks users to send recorded game file too.
+
+--Fixed invalid memory read when generating hint for use-on-bare-ground
+  transition.
+
+--Fixed spelling of eighth cousin.  Thanks Trick.
+
+--Flying object on pick-up now snaps into hand when you turn to walk away
+  (instead of floating behind you magically, trying to catch up with you).
+
+
+
+
+Server Fixes
+
+--Holding age restrictions now correctly apply to what you end up holding after
+  healing someone (babies can no longer remove arrows from wounded people).
+
+--Support for writing attached to objects through new map metadata database.
+
+--Fixed a bunch of server cases that weren't calling hideIDForClient before
+  sending object ID to client, which was causing a client-side crash when
+  metadata IDs were not being stripped out.
+
+--Say limit based on age only enforced when reading if you are < 10 years old.
+
+--Fixed bug in dataBundle script that caused old scenes to be deleted every
+  update.
+
+--Server now closes server socket immediately at start of shutdown process.
+  Before, it would accept connections from clients and the reflector and then
+  just hang there.  Now these connections are insta-rejected if server is in
+  the process of shutting down.
+
+--Fixed so that right-clicking worn backpack swaps held with bottom item in
+  pack.  Works the same when worn or on the ground now.
+
+--Can no longer dress or swap clothing on elderly (was allowing theft of
+  elderly backpacks).
+
+--Fixed so that nextID in metaData ID space is preserved across server
+  restarts.  Was overwiting existing written notes after restart.  Fixes #118.
+
+
+
+
+
+Version 130    2018-August-17
+
+--Fixed GUI layout spacing in scene editor.
+
+--Fixed glitch in moving objects that consume destination object (visual
+  duplication of objects) if client falls behind server moves.
+
+--Editor support for inverting scanned sprites (for making white smoke).
+
+--Support for certain sprite layers being drawn behind player (example:
+  tracks under cart).
+
+--Floors can have speed modifiers (roads make you move faster, for example),
+  but they are only applied by client and server if entire path is on the same
+  floor.
+
+--Auto-follow rideable floors (aka roads).
+
+
+
+
+Server Fixes
+
+--Added a few more MySQL indexes to speed up front page queries in lineage
+  server.  One of these queries used to take 1.2 seconds, and now takes
+  0.00079350 seconds, or a 1500x speedup.  Front page of family tree browser
+  now loads quickly.
+
+--Support for skipping look-time based cleanup for profiling purposes.
+
+--Support for skipping removed object cleanup and use dummy cleanup (to speed
+  up profiling cycle).
+
+--Profiler found that looking up container cells in map, when doing
+  lookAtRegion operation, was a huge hotspot.  All we needed was a count of
+  how many contained items are present.  We don't need a db lookup for that.
+  Now storing these in a hash table.  This results in a 91x speedup for the 
+  lookAtMapRegion call.
+
+--We can safely assume ID=0 tiles never decay, greatly improving performcance
+  of checkDecayObject, which is called a lot when people are moving around the
+  map.
+
+--Profiler found that tokenizeString, which is used to parse client messages,
+  consumes a resonable amount of CPU.  Wrote optimzed version for 2x speedup.
+
+--Switched to a 7x faster in-place tokenizeString implementation for parsing
+  MOVE messages.
+
+--Profiler found sscanf hotspot in message parsing code.  Replaced with own
+  task-specific implementation for a 4x speedup. 
+
+--Next profiler hotspot is dbLookTimePut, which is being called in every dbGet
+  call, even if dbGet result is cached in RAM.  We're constantly touching the
+  lookTime database.  But look times don't need to be so fine-grained.  +/- 1
+  hour precision is fine.  Changed lookTime db coordinates to be x/100,y/100
+  (one time for every chunk of 100x100 tiles), and changed to register new look
+  times only when map chunks are fetched (registering the four corners of the
+  chunk only).
+
+--Next profiler hotspot:  RAM caching around time.db.
+
+--Next profiler hotspot:  isMapSpotBlocking, which is called for each spot on
+  each move path submitted.  RAM caching results, and clearing cache record
+  when map cell changes.
+
+--Profiler found that printf was actually using quite a bit of CPU.  Removed
+  all printf statements from MOVE message processing.  This is the most common
+  message type, and processing it involved the most print statements.
+
+--Support for flushing look times on first server startup to avoid mismatch
+  errors between old look time format, which was indexed as x,y, and new
+  format, which is indexed as x/100, y/100.  On first startup after this
+  change, we treat all map cells as not stale.
+
+--Profiler hotspot:  getChunkMessage is checking for contained items even for
+  empty map cells or cells that have no container slots.
+
+--Profiler hotspot:  the existence of tutorial maps in biome database causes
+  biome to be looked up elsewhere on map.  We can track max/min x,y locations
+  where biomes exist before looking in the biome database.
+
+
+--Switched over to new, custom-coded linearDB as a replacement for stackDB.
+  Huge performance gains.
+
+--Disabled nightly server map backup operation.  Map databases have gotten so
+  big that this operation, which must interrupt server activity for safety, now
+  takes 10 seconds on server1.  These map backups have never been needed and
+  take up substantial disk space.
+
+--LinearDB3 is in place.  Inserts are much faster.  Other operations are faster
+  than any previous database engine.
+
+--Profiler found 5M+ vector operations happening for each tutorial map insert
+  (because we're checking for map changes).  Disabled map change tracking
+  during tutorial map insert.  This could cause some strange behavior if an
+  escaped tutorial player walks into a new player's tutorial area at the moment
+  of loading, but there's going to be strange behavior there no matter what.
+
+--Split tutorial map loading up into 5-ms steps that are interleaved with other
+  server processing steps.  Server no longer stalls for 1+ second while a
+  tutorial map loads into a full database.  Tutorial players may have to wait
+  a tiny bit longer, but that's okay.
+
+--Index added to name colum of lineage server lives database to make name
+  searches faster.
+
+--Lineage server now only supports name prefixes in character name searches
+  (so 'Jon' matches 'Jonathan Lucky' but 'Lucky' does not match it).  Turned
+  out that full wildcard searches involved a full table scan and had gotten
+  intolerably slow, even after the index for names was added.
+
+--Player cap up to 200 on all servers, preparing to roll out new lineardb3 to
+  all.
+
+--Fixed major high CPU spike issue due to uninitialized variable.
+  Thanks Jincheng L.
+
+--Fixed server crash due to a typo.
+
+--Fixed bug in adding transitions with a move distance.
+
+--Objects that move N/S/E/W keep moving even when out of view, permitting
+  long-distance rails to function.
+
+--Fixed potential c-standard violation in having same file fopen-ed multiple
+  times in parallel during tutorial map loading.
+
+--Fixed handling of transitions where object moves onto bare ground.
+
+--Apply bare ground transition, if any, when object blocked from moving.
+
+--NSEW moves never move farther than specified, even if ground object present.
+
+--Fixed a bug in the loop over possible spots to move to (don't need i=0).
+
+--Eve placement adjusted to bring Eves twice as close together as before.
+
+
+
+
+
+Version 126    2018-July-18
+
+--Trim whitespace from start and end of twin codes entered by user. 
+  Hidden whitespace could cause a mismatch.
+
+--Wow.  Twin implementation in client is totally broken, and not sending twin
+  code to reflector at all.  Anyone who successfully played with twins so far
+  was just lucky (both got sent to the same server by random chance).
+
+--MENU button on rebirth choice page to return to login screen.
+
+--Borderless mode on settings page.
+
+--More info in fps mismatch error message.
+
+--Custom server can now be configured on SETTINGS page.
+
+--Fixed wayward KEEP_ALIVE message from client if player waits a while before
+  pressing LOGIN button.  Fixed lots of other little connection glitches, and
+  made the connection phases more clear (connecting vs waiting to be born vs
+  loading map).
+
+--Custom server status shown on connection page if set.  No more forgetting
+  that it's set and wondering why you can't connect with a friend.
+
+--Fixed bug in reopening connection after signal set to leave LivingLifePage.
+  This was causing a bad socket to remain open, which could cause subsequent
+  logins to fail (usually after pressing x to leave twin waiting screen).
+
+
+
+
+
+
+
+Server Fixes
+
+--Eve location reususe after server restart upped to 10 chances instead of 3.
+  Also made it a setting that can be changed at runtime.
+
+--Proper formatting of roman numeral suffixes in family tree browser.
+
+--Added tracking of which names have suffix already in server to avoid
+  mistakenly treating suffix like a last name.
+
+
+
+Version 125    2018-July-13
+
+--Added client source code version match check in platform build scripts
+  (to prevent problem that happened during release of v123).
+
+--Fixed invisible babies, bouncing forever, duplicated objects, and all sorts
+  of other problems caused when a player carries a baby out of range (so that
+  updates aren't received about them anymore), and then a different player
+  carries the same baby back into range.  Messages about the held baby were
+  being queued by the client, since the client was still waiting for the first
+  player to drop the baby, but the drop happened out of range.
+
+--Fixed so that mouse-over works correctly for moving people (you used to have
+  to mouse over the next tile on their path, but now you can mouse over their
+  exact position mid-move).  This also makes it much easier to kill a moving
+  player that is crossing over thing on the ground.
+
+--Added player ID parameter to KILL, BABY, and UBABY client messages to specify
+  a specific player that the client clicked on (no more killing a bystander who
+  was standing in the same tile as the person you actually clicked on, and no
+  more grabbing the wrong baby).
+
+--Players have always been drawn in age order (youngest in front), so now
+  mouse-over works the same way.  This worked by accident most of the time,
+  because most people enter the game in age order, but was broken for an Eve
+  that entered later than a baby (she would capture mouse clicks of the baby
+  she was standing visually behind).
+
+--TEMP LOGIN was a confusing feature.  Added CLEAR ACCOUNT button instead.
+
+--Twin system.  Players can share a code friends and get born as identical
+  twins, triplets, or quadruplets.
+
+
+
+
+
+Server Fixes
+
+--Server logs curses cast and curse score changes.  These logs are backed up
+  along with lifeLogs.
+
+--Web export of curse logs along with life logs.
+
+--Curse system saves state between runs of given server.  Thus, cursed status
+  isn't reset when server restarts (no more free pass to griefers right before
+  an update).
+
+
+
+
+Version 123    2018-July-10
+
+--Fixed memory leak and uninitialized variable.
+
+--Fixed bad memory access in audio callback when shutting down.
+
+--Fixed memory leak in update process.
+
+
+
+
+Windows base update:   Version 65c    2018-July-10
+
+--Fixed slow newline replacement code (as part of update process) that was 
+  getting bogged down when processing text files with many lines.
+
+
+
+
+Server Fixes
+
+--Anyone can name a held baby, even adoptive parents.  They get the last name
+  of their adoptive parent.  An unnamed person who is older than baby age can
+  be named by anyone nearby, but they will never have a last name.
+
+--If a name isn't unique as far as the curse system is concerned, a roman
+  numeral suffix (II, III, IV, V, etc.) is automatically added.
+
+--Data-only diff bundle generation script now skips scenes.  They never should
+  have been included, and the tutorial map scene was BIG (26,000 lines).
+
+
+
+
+Version 122    2018-July-6
+
+--Back to updating hard-coded version number with every client update.  Not
+  sure what I was thinking there.  Saw a version mismatched and found the
+  wrong reason for it.
+
+
+
+
+Version 121    2018-July-6
+
+--Fixed newly introduced bug in sound volumes for positioned sound source when
+  far enough away that volume equation becomes negative (was causing all kinds
+  of sound glitches).
+
+--Responds to new SD (FORCED_SHUTDOWN) message from server.
+
+--Fixed bug that prevented body clothing from being removed.
+  Thanks Midget Maker.
+
+
+
+Server Fixes
+
+--Added new forcedShutdown trigger for server, to cleanly shut down server,
+  and send notice to connected clients, without waiting for everyone to live
+  out their lives.  Need this for emergencies sometimes, and sending SIGSTP to
+  the server, unlike ctrl-z, wasn't working.
+
+
+
+
+Version 119    2018-July-6
+
+--Fixed glitch when picked up and put down by an adult who still has messages
+  pending (thanks Jacek T).  Also handled case where two adults are passing
+  baby back and forth.  It's still a little jumpy if the baby's client has
+  delay, but at least the end result is correct now.
+
+--Fixed bug where player can still try to click on baby's old ground location
+  while the baby is held by someone else.
+
+--NONE RELEVANT if the filter matches, but no transitions are relevant, but
+  NO MATCH if the filter simply doesn't match anything.
+
+--Fixed so that you can't click on arm by accident when trying to click on
+  tunic, bottom, or backpack clothing.  Arm should be unclickable if you are
+  wearing clothes.
+
+--Curse system.  Everyone starts with one curse token and zero curse points. 
+  CURSE JANE SMITH curses Jane Smith, giving her one curse point, and consuming
+  the sayer's curse token.  Sayer gets new curse token after two hours of play.
+  One curse point removed after each hour of play.  A baby with ten or more
+  curse points is born marked.  A marked person cannot be cursed further until
+  they are born unmarked later.  Curse token displayed near temp meter.
+
+--Fixed several bugs in UI paper slip animations and clearing when not
+  operating at full frame rate.
+
+--Home arrow shows tile distance if target is more than 1000 tiles away.
+  Useful for judging whether distant monuments are worth the trip.
+
+
+
+
+Server Fixes
+
+--Fixed typo in computation of stagger time for player who is wounded multiple
+  times.  Fixes #41.  Thanks UncleGus.
+
+--Added YOU'RE and YOURE and I'M and IM as naming phrases, after seeing that in
+  the Life of Bumpy video.
+
+--Fixed so that grave doesn't disappear if you are standing on a cross of
+  permanent objects when you die.  Server now searches in a spiral of 100
+  tiles around your current location to find an empty spot for your grave.
+
+--Max players back down to 140 from 200, so load balancing kicks in at 70
+  players instead of at 100 players.
+
+--Fixed some crashes when baby marked as held by player that is gone.
+
+--Fixed order of naming phrases so that prefixes of other phrases come last.
+
+
+
+
+Version 118    2018-June-29
+
+--Support for masked speech output in client (useful for making gifs).
+
+--Support for tutorial trigger on client login, and server loading a tutorial
+  map out in the unused wilderness and placing player at start of the tutorial.
+
+--Scene editor support for copy/paste of 6x6 area.  Fixed memory leak.
+
+--New crafting hint filter system.  Say /hatchet to show only hints relevant to
+  making a hatchet.  Say / by itself to clear the filter.
+
+--Time played in other lines before returning to a line pushed up to 1.5 hours.
+
+--People who kill, regardless of their time in a line (even less than a half
+  hour) are given the full lineage ban, just like murder victims.  Killing
+  counts as fully participating in a line.  This prevents grief-killers from
+  suiciding before 30 minutes and coming right back.
+
+--TEMP LOGIN button hidden along with login button when checking for FPS
+  mismatch (otherwise, someone might press TEMP LOGIN upon not seeing LOGIN at
+  first).
+
+--Typo in objectBank.  Fixes #39.  Good catch UncleGus.
+
+--Fixed so that you can never click on a held baby by clicking its last ground
+  position (could kill a held baby by accident when trying to set a weapon
+  down where they were standing before pick-up).
+
+
+
+
+
+Version 115    2018-June-22
+
+--Babies now carry their wounds with them when they are picked up, instead of
+  discarding them.
+
+
+
+
+Server Fixes:
+
+--Deadly map spots (attacking animals) put on cooldown for 10 seconds after an
+  attack to prevent multiple repeat attacks on the same person before they
+  realize what has happened.
+
+--Fixed glitch in generation of transitions that apply to every use dummy of
+  an actor.
+
+--Fixed glitch in biome database at position 0,0.
+
+
+
+
+Version 112    2018-June-21
+
+--Fixed category editor to let a category be picked on the parent side that is
+  also a child of another category (pattern categories can be part of other
+  categories now, like pink rose seeds, which are a pattern for other rose
+  seeds, but also in the small trash category).
+
+--Fixed search for limbs in objects that have no hands or feet.
+
+--Fixed so that you can mouse-over and click on a person standing behind a tree.
+
+--Hunger slips (and chimes) shown at 8 and 4 instead of 6 and 3 food remaining.
+
+--Mousing over wounded self now describes the wound.
+
+--Support for clicking on a player with a curing object to heal a wound.
+
+
+
+
+Server Fixes:
+
+--Keeping server database backups 7 days instead of 14.
+
+--Fixed bug in setting decay ETA for newly held object.
+
+--Rework lineage ban.  Now it kicks in after you've lived 30 minutes total in a
+  given family line, and gets cleared when you've lived at least 60 minutes
+  total in other family lines.  Instantly kicks in if you get murdered,
+  regardless of how long you lived in that line so far.  Has very little
+  impact on dying babies, because they clock so little time before dying.
+  Thus, new players who die young a lot, and players who are abandonned as
+  babies, are not blocked from getting reborn in the same village.
+
+--Animal attacks now can set a wound on a player and put them into a dying
+  stagger just like murder.  No more instant death (except from hunger and old
+  age).
+
+--Getting attacked again while still wounded causes remaining stagger time to
+  be cut in half.
+
+--With new healing in place, no longer need to delay hunger when wounded.
+
+
+
+
+
+Version 110    2018-June-14
+
+--Transition editor now includes category transitions in list of 'uses'
+  transitions at the bottom of the screen (for example, looking at a leaf shows
+  transitions that use a leaf and transitions for the small trash category).
+
+--Fixed animation glitches when a moving object transitions from ground to
+  moving.  Was preserving frozenRotFrameCount, and setting ground frame count
+  back to 0 each time, even when we didn't need to be (when moving object had
+  no rotating parts).  (Example:  blood squirting from goose neck.)
+
+--Fixed so that d1 use dummy keeps its creation sound even if creation sound
+  marked initial only.  This sound will play during reverse use (example:
+  adding a burrito to an empty plate).
+
+--Transition editor shows color-coded transitions from categories and patterns
+  in both produced by and produces list.
+
+--New yummy food multiplier system.  After eating two different foods, you get
+  a yum bonus of 1 food and your yum multiplier goes up to 1.  With each unique
+  food that you eat, your yum multiplier goes up by one, and this multiplier is
+  added to your yum bonus.  When you finally repeat a food, your yum multiplier
+  goes back to 0.  Yum bonus functions as extra food units above and beyond
+  your normal food bar.  By chaining many unique foods, the yum multiplier and
+  resulting yum bonuses can be very large.  Holding a food in your hand tells
+  you whether it is yummy or meh.  Sorry about the word 'yum', but there really
+  isn't any other short word for that concept except for nom, which is way too
+  internet.  And meh?  I don't think there's any other word for that.  It's
+  kinda meh, though.  And yes, Jere, you'll still get the bonus if you save
+  your buttered roll for last.
+
+
+ 
+
+
+
+Server Fixes:
+
+--Added work-around for non-clean shutdown that can leave dummy objects in map
+  that may be interpreted as new category objects after restart.  Category
+  objects removed from map during map cleaning process.
+
+--Added cron job for game servers that clears bug log files older than four
+  days to conserve disk space.
+
+--Death stagger time up to 40 seconds instead of 20.
+
+--Food decrement no longer happens during death stagger.  You won't starve to
+  death after being mortally wounded.
+
+--Fixed server crash when held tattered backpack decays to nothing.
+
+
+
+
+
+Version 107    2018-June-8
+
+--No longer using ancestor test to determine if creation sound should play for
+  objects marked with creationSoundInitialOnly.  Exclusively using sprite
+  subset test.
+
+--Was waiting 166ms for bouncing animation to start a bit before sending our
+  action message.  This prevents weird insta-response on fast connections
+  (where we get the grabbed item in our hand even before really moving toward
+  it).  However, on slow connections, this 166ms adds to perceived latency,
+  because we still need to wait for the message round trip after that.  Now we
+  measure most recent round trip time and use it to decrease this bouncing
+  start time before sending our action message.  If round trip is slow enough
+  (>166ms), we don't need to wait at all before sending our action message to
+  the server.  If round trip time is 80 ms, for example, we'd only wait/bounce
+  for 86ms before sending our message.
+
+--Added support for rotated sprites when baking in object editor.
+
+
+
+
+
+Server Fixes:
+
+--Fixed so that useChance applies in last transition back to parent object
+  (example:  refilling last step of pond should have 1/5 chance of taking pond
+  to full state, when before it had 1/1 chance, allowing for an infinite water
+  exploit).  Thanks Eve, YAHG, and Rebel.
+
+--Support for NOT dying when riding over a deadly object (like a rattlesnake)
+  on a vehicle (like a horse), but support for transitions to the ridden object
+  (dead horse or tipped horse cart).
+
+--Fixed so that creation sound not played for items dropped on the ground when
+  held container shrinks.
+
+--Fixed heldTransitionSourceID after use-on-ground transitions.
+
+
+
+Version 105   2018-June-1
+
+--Fixed crash in transition bank pattern code.  Thanks Enforcerke and Jookia.
+
+--Fixed spurious client BUG reports by resetting timer when we receive a
+  move-done message in the middle of waiting for a move-and-do cycle to
+  complete.  Thanks Sarah V.
+
+--Fixed bouncing-forever bug caused by path truncation.  Thanks Malo T.
+
+
+
+
+
+Version 102   2018-May-31
+
+--Fixed scene editor to display behind floor hugging objects correctly.
+
+--Fixed bug in client sending multiple jump-out-of-arms move messages due to
+  rapid clickly by held-baby-player, resulting in the server registering false
+  moves after the jump-out-of-arms, and a bouncing-forever bug as a result.
+  Thanks Gabriel G.
+
+--Fixed overlap of foot bar with gui in object editor.
+
+--Widget for Using Sound visible for all objects in object editor.
+
+--Fixed sound-doubling issues (dumping water into empty pond, grabbing
+  second-to-last stone from stone pile).
+
+--Fixed so that comment (after # text) is hidden from eaten food description.
+
+--Fixed code for generic transition filling to handle case where an object has
+  both regular and last use generic transition defined.
+
+
+
+
+
+Server Fixes:
+
+--Fixed one source of bouncing-forever bug where baby move arrives in same
+  server step as parent's pick-up action.  Thanks Lynne C.
+
+
+
+
+Version 100   2018-May-25
+
+--Support for marking categories as patterns.
+
+--Support for auto-generated transitions based on new pattern categories.
+  Example:  define transition web for pink roses, and then set the pink rose
+  objects as the pattern for all white and red rose objects (seeds, sprouts,
+  etc.)  Wherever a transition involves at least two objects that are both part
+  of a pattern of the same size, the transition is replicated for all the other
+  members of that pattern.  Unlike other categories, which never appear in the
+  game and are just abstract placeholders to be filled in by member objects,
+  pattern categories have a real object as their parent (example:  pink rose
+  seed, with children red and white rose seeds).
+
+
+
+
+
+
+Version 99    2018-May-24
+
+--Label for a grave of a known person now moves with bone pile.
+
+--Fixed editor use chance and sim GUI elements disappearing with object picker
+  cleared.
+
+--Fixed so that non-permanent objects on ground are drawn in front of permanent
+  objects.  Thus, hand cart handle sticks out in front of well.
+
+--Fixed so that walls drawn in front of other tiles in row, improving overlaps
+  for trees, carts, and other overhanging objects.
+
+--Client detects largest message time gaps between server messages to prevent
+  it from sending BUG report messages to server during true network outages.
+
+--Fixed wayward chat sheet pop-up.  Thanks Yuyu.
+
+--Client now informs player when BUG report sent to server, and asks them to
+  email stdout.txt, if stdout.txt exists.
+
+--Face portrait output in editor fixed to clear picked layer first (or else
+  picked layer appears in every age portrait).
+
+
+
+
+Server Fixes:
+
+--Bug reports off again until better client-side differentiation in place.
+
+--log.txt backed up and cleared every 24 hours instead of 48 to save disk space.
+
+--Fixed bugs in lineage server triggered by playerIDs that are the same between
+  servers.
+
+--Fixed player invisibility bug.  Thanks Yuyu.
+
+--Fixed various edge cases in random family member picking code.
+
+
+
+
+
+Version 97    2018-May-18
+
+--Adding missing case to used object transition generation.  Thank Fernando GBR.
+
+--Fixed bug in the way time values were recorded in recordedGames.
+
+--Fixed bugs in wall hugging code for floors that was screwing up multi-layer
+  floors that used multiplicative blending (ancient floors).
+
+--Undisturbed grave now marked with known person's name and relationship.
+
+
+
+
+
+
+Server Fixes:
+
+--Fixed bug in lineage server that caused death to not get logged if last words
+  contained a single quote mark.
+
+--Added Daily and Weekly long lines to family tree browser.
+
+--Family tree view now shows most ancient ancestor at top.
+
+--More efficient relation computation for shallow relations in deep trees.
+  Cut-off of 25 generations when computing relations in deep trees (beyond
+  that, people become Distant Relatives) because it was getting too slow to
+  compute.
+
+--Fixed family tree to show '1 second' instead of '1 seconds'.
+
+--Fixed so that murdered person's last words shown correctly in family tree,
+  and so that a murdered person who starves to death before dying isn't logged
+  twice.
+
+--Server now sends non-human death-source ID to lineage server (snake, etc).
+
+--Lineage server displays a variety of death reasons.
+
+--Lineage server tracks and displays deepest descendant generation at bottom
+  of family tree display.
+
+--Added character_dump api call to lineage server.
+
+--Fixed lineage server behavior on IDs that don't exist.
+
+--Turned on bug reporting again, trying to catch bouncing lag bug.
+
+--Fixed bug in out-of-range player PO message.
+
+--Added extra server logging about player update messages to catch bouncing
+  lag bug.
+
+--Clicking on killer's name shows their relationship to you in family tree.
+
+--Family tree Email search now only matches exact email addresses, to thwart
+  brute-force email harvesting through trial and error.  Thanks Brian R.
+
+
+
+
+
+Version 95    2018-May-11
+
+--Fixed some transition hints.  New transition system leaves some lastUse
+  transtions in place that aren't used by server.  Client shouldn't show these
+  as redundant hints.  Client was showing NOTHING as result in case where actor
+  was used up and target stayed the same (adding stone to a pile).  Now shows
+  same target as result instead of NOTHING.
+
+--Added display of current slot position in object editor.
+
+--Fixed so that arrow keys in text field do not change rotation anchor in
+  animation editor.
+
+--Editor saving face portaits throughout life for use in family tree viewer.
+
+--Client now displays Big and Little words for siblings, and also detects twin
+  status (including identical).
+
+--Client shows A,B,C,...AA, AB,... labels for varible objects and ? label for
+  base object (like for locks after restart).
+
+
+
+
+
 Server Fixes:
 
 --Whoops, forgot to commit/push changes to transition bank.  Bug city on live
   servers.
+
+--Back to registering lookTime whenever non-zero map or floor values are gotten
+  from database, instead of just registering lookTimes on map changes.  Only
+  looking on map change was an optimization that was necessary with the old
+  database engine, but hopefully the new engine can handle it.  Also, we are no
+  longer tracking look times for bare ground, so that should help a lot too.
+  This will prevent walls and other untouched but seen-in-the-last-24-hours
+  objects from disappeariing on server restart.
+
+--Temporarily pushed no-look cull time on server restart up to 1 week to work
+  around the lookTime issue in the next restart (which will be needed to make
+  the above fix to lookTimes live).  I.e., if it was added to the map in the
+  last week, it will not be culled in the next server restart.
+
+--Fixed generation of transitions with a minUseFractions (a well can only be
+  built from a full stone pile, for example).
+
+--Server filters SAY messages according to allowed character list.
+
+--On server shutdown, variable objects (keys and locks) now revert to their
+  parent form instead of being cleared.  All keys open all locks after server
+  restart.  Combined with new transitions that allow door locks to be removed
+  and turned back into lock blanks, this allows all doors to be re-keyed after
+  a server reset, meaning that new family lines are not locked out.
+
+--Server now adjusts all client-sent coordinates relative to player's birth
+  position in world.  No more absolute coordinates.
+
+--Fixed bug that caused some initial new-baby PLAYER_UPDATE (PU) messages to
+  not be sent, causing the following lineage message for that new baby to be
+  ignored by client (leading to NO RELATION for some actually-related babies).
+
+--Added same-lineage-birth blocking for a time that is based on the size of the
+  server population.  Below 10 players, there is no same-lineage blocking.
+  From 11 to 50 players, it rises linearly up to the full cooldown time, which
+  is currently 3 hours, and may increase in the future.
+
+--Server now sends lineage info to lineageServer upon player death.
+
+--Baby inherits the last-heard monument call from parent at 0.5 years old.
+  Thus, trips to a monument can be trans-generational (parent can die along
+  the way and baby can continue).
+
+--Support for categories in cross-transitions (where actor ends up on ground as
+  newTarget or target ends up in hand as newActor).
+
+--Server now hides ID of locked objects from the client by replacing it with
+  the parent ID for that variable object.
+
+
 
 
 Version 90    2018-May-3 

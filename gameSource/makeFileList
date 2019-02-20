@@ -61,6 +61,9 @@ TextArea.cpp \
 RadioButtonSet.cpp \
 spellCheck.cpp \
 SoundUsage.cpp \
+TwinPage.cpp \
+objectMetadata.cpp \
+emotion.cpp \
 
 
 GAME_GRAPHICS = \
@@ -102,6 +105,10 @@ graphics/homeArrows.tga \
 graphics/homeArrowsErased.tga \
 graphics/homeSlip.tga \
 graphics/hiddenFieldTexture.tga \
+graphics/yumSlip1.tga \
+graphics/yumSlip2.tga \
+graphics/yumSlip3.tga \
+graphics/yumSlip4.tga \
 
 
 
@@ -153,4 +160,5 @@ NEEDED_MINOR_GEMS_OBJECTS = \
  ${CRYPTO_RANDOM_O} \
  ${DIFF_BUNDLE_CLIENT_O} \
  ${STRING_TREE_O} \
+ ${CRC32_O} \
 

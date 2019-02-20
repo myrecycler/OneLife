@@ -282,18 +282,34 @@ void initTransBankFinish() {
             for( int c=0; c<numCats; c++ ) {
                 
                 int parentID = getCategoryForObject( oID, c );
-                
-                SimpleVector<TransRecord*> *parentTrans = 
-                    getAllUses( parentID );
 
-                if( parentTrans == NULL ) {
+                CategoryRecord *parentCat = getCategory( parentID );
+                
+                if( parentCat->isPattern || parentCat->isProbabilitySet ) {
+                    // generate pattern transitions later
+                    // don't generate andy transitions for prob sets
                     continue;
                     }
                 
-                int numParentTrans = parentTrans->size(); 
+                SimpleVector<TransRecord*> *parentTransOrig = 
+                    getAllUses( parentID );
+
+                if( parentTransOrig == NULL ) {
+                    continue;
+                    }
+                
+                // make copy of it
+                // we add transitions below, and it may cause 
+                // parentTrans to be reallocated internally
+                SimpleVector<TransRecord *> parentTrans;
+                
+                parentTrans.push_back_other( parentTransOrig );
+                
+                
+                int numParentTrans = parentTrans.size(); 
                 for( int t=0; t<numParentTrans; t++ ) {
                     
-                    TransRecord *tr = parentTrans->getElementDirect( t );
+                    TransRecord *tr = parentTrans.getElementDirect( t );
                     
                     // override transitions might exist for object
                     // concretely
@@ -343,6 +359,12 @@ void initTransBankFinish() {
                         if( newActor == parentID ) {
                             newActor = oID;
                             }
+                        else if( newTarget == parentID ) {
+                            // cross-case
+                            // actor left on ground in place of target
+                            newTarget = oID;
+                            }
+                        
                         // don't write to disk
                         addTrans( actor, target, newActor, newTarget,
                                   tr->lastUseActor,
@@ -372,6 +394,11 @@ void initTransBankFinish() {
                         target = oID;
                         if( newTarget == parentID ) {
                             newTarget = oID;
+                            }
+                        else if( newActor == parentID ) {
+                            // cross-case
+                            // target ends up in hand
+                            newActor = oID;
                             }
                         
                         // don't write to disk
@@ -438,6 +465,120 @@ void initTransBankFinish() {
                 records.size() - numRecords );
         
         numRecords = records.size();
+
+
+
+        for( int i=0; i<numRecords; i++ ) {
+            TransRecord *tr = records.getElementDirect( i );
+
+            int transIDs[4] = { tr->actor, tr->target, 
+                                tr->newActor, tr->newTarget };
+            
+            CategoryRecord *transCats[4] = { NULL, NULL, NULL, NULL };
+            
+            int patternSize = -1;
+            int numPatternsInTrans = 0;
+            
+            for( int n=0; n<4; n++ ) {
+                
+                if( transIDs[n] > 0 ) {
+                    transCats[n] = getCategory( transIDs[n] );
+                    if( transCats[n] != NULL ) {
+                        if( ! transCats[n]->isPattern ) {
+                            transCats[n] = NULL;
+                            }
+                        if( transCats[n] != NULL && patternSize != -1 &&
+                            transCats[n]->objectIDSet.size() != patternSize ) {
+                            // doesn't match what's already set
+                            transCats[n] = NULL;
+                            }
+                        else if( transCats[n] != NULL && patternSize == -1 ) {
+                            // set it
+                            patternSize = transCats[n]->objectIDSet.size();
+                            }
+                        if( transCats[n] != NULL ) {
+                            numPatternsInTrans++;
+                            }
+                        }
+                    }
+                }
+            
+            // pattern only applies if at least one of actor or target
+            // has pattern apply.
+            // (don't fill out pattern if only newActor or newTarget have
+            //  pattern apply, because this will just replace the master
+            //  transition with final element of the pattern list)
+            
+            // is there any reason to require numPatternsInTrans >=2 ?
+            // That is what the original code did, but I'm not sure.
+            // As long as actor or target are a pattern, I think we're
+            // okay applying one-pattern transitions.
+
+            // for example, if a pink rose bush turns into a non-pattern object
+            // (like a dead rose bush), then this SHOULD apply to all 
+            // rose bushes that are part of the pattern.
+
+            // Not requiring numPatternsInTrans >=2 also fixes the problem
+            // with decay-to-nothing for dead dogs and puppies
+            // (That German Shepherd transition only has one pattern object
+            //  in it, because "nothing" is not a pattern.)
+            
+            if( numPatternsInTrans > 0 && 
+                ( transCats[0] != NULL || transCats[1] != NULL ) ) {
+                
+                for( int p=0; p<patternSize; p++ ) {
+                    int newTransIDs[4] = { tr->actor, tr->target, 
+                                           tr->newActor, tr->newTarget };
+                    
+                    for( int n=0; n<4; n++ ) {
+                        if( transCats[n] != NULL ) {
+                            newTransIDs[n] = 
+                                transCats[n]->objectIDSet.getElementDirect( p );
+                            }
+                        }
+
+                    // don't replace explicitly-authored trans with an auto-
+                    // generated one based on a pattern
+                    // the authored trans trumps the pattern
+                    TransRecord *existingTrans = getTrans( newTransIDs[0],
+                                                           newTransIDs[1],
+                                                           tr->lastUseActor,
+                                                           tr->lastUseTarget );
+                    if( existingTrans == NULL ) {    
+                        // no authored trans exists
+
+                        addTrans( newTransIDs[0],
+                                  newTransIDs[1],
+                                  newTransIDs[2],
+                                  newTransIDs[3],
+                                  tr->lastUseActor,
+                                  tr->lastUseTarget,
+                                  tr->reverseUseActor,
+                                  tr->reverseUseTarget,
+                                  tr->noUseActor,
+                                  tr->noUseTarget,
+                                  tr->autoDecaySeconds,
+                                  tr->actorMinUseFraction,
+                                  tr->targetMinUseFraction, 
+                                  tr->move,
+                                  tr->desiredMoveDist,
+                                  tr->actorChangeChance,
+                                  tr->targetChangeChance,
+                                  tr->newActorNoChange,
+                                  tr->newTargetNoChange,
+                                  true );
+                        }
+                    
+                    }
+                }
+            }
+        
+
+        
+        printf( "Auto-generated %d transitions based on pattern categories\n", 
+                records.size() - numRecords );
+        
+        numRecords = records.size();
         }
 
 
@@ -470,17 +611,19 @@ void initTransBankFinish() {
                 
                 int oID = o->id;
 
-                TransRecord *genericTrans = getTrans( oID, -1, false );
                 
-                if( genericTrans == NULL ) {
-                    // try last use instead
-                    genericTrans = getTrans( oID, -1, true );
-                    }
+                TransRecord *genericTrans[2];
+
+                // use and last use
+                genericTrans[0] = getTrans( oID, -1, false );
+                genericTrans[1] = getTrans( oID, -1, true );
                 
                 
-                if( genericTrans != NULL && genericTrans->newTarget == 0 ) {
+                for( int g=0; g<2; g++ )
+                if( genericTrans[g] != NULL && 
+                    genericTrans[g]->newTarget == 0 ) {
                     
-                    char lastUseActor = genericTrans->lastUseActor;
+                    char lastUseActor = genericTrans[g]->lastUseActor;
                     
                     numGenerics ++;
                     
@@ -503,7 +646,7 @@ void initTransBankFinish() {
                                 
                                 newTrans.lastUseActor = true;
 
-                                newTrans.newActor = genericTrans->newActor;
+                                newTrans.newActor = genericTrans[g]->newActor;
                                 
                                 transToAdd.push_back( newTrans );
 
@@ -511,7 +654,7 @@ void initTransBankFinish() {
                                 }
                             else {
                                 // replace in-place with generic use result
-                                tr->newActor = genericTrans->newActor;
+                                tr->newActor = genericTrans[g]->newActor;
                                 
                                 numChanged ++;
                                 }
@@ -533,7 +676,7 @@ void initTransBankFinish() {
                                 
                                 newTrans.lastUseTarget = true;
 
-                                newTrans.newTarget = genericTrans->newActor;
+                                newTrans.newTarget = genericTrans[g]->newActor;
                                 
                                 transToAdd.push_back( newTrans );
 
@@ -541,7 +684,7 @@ void initTransBankFinish() {
                                 }
                             else {
                                 // replace in-place with generic use result
-                                tr->newTarget = genericTrans->newActor;
+                                tr->newTarget = genericTrans[g]->newActor;
                                 
                                 numChanged ++;
                                 }
@@ -693,16 +836,33 @@ void initTransBankFinish() {
                     }
                 else {
                     // default, no decrement
-                    
-                    // at least one
-                    TransIDPair tp = { tr->actor, tr->newActor, tr->newActor };
-                    actorSteps.push_back( tp );
+                 
+                    if( actor != NULL &&
+                        tr->reverseUseActor && 
+                        newActor != NULL && newActor->numUses > 1 ) {
 
-                    if( actor != NULL && actor->numUses > 1 ) {
-                        // apply to all actor dummies
-                        for( int u=0; u<actor->numUses-1; u++ ) {
-                            tp.fromID = actor->useDummyIDs[u];
-                            actorSteps.push_back( tp );
+                        TransIDPair tp = { actor->id, 
+                                           newActor->useDummyIDs[0] };
+                        actorSteps.push_back( tp );
+                        }
+                    else {
+                        // at least one
+                        TransIDPair tp = 
+                            { tr->actor, tr->newActor, tr->newActor };
+                        actorSteps.push_back( tp );
+                        
+                        if( actor != NULL && actor->numUses > 1 ) {
+                            // apply to all actor dummies
+                            for( int u=0; u<actor->numUses-1; u++ ) {
+                                float useFraction = 
+                                    (float)( u+1 ) / (float)( actor->numUses );
+                            
+                                if( useFraction >= tr->actorMinUseFraction ) {
+                                    
+                                    tp.fromID = actor->useDummyIDs[u];
+                                    actorSteps.push_back( tp );
+                                    }
+                                }
                             }
                         }
                     }
@@ -750,7 +910,16 @@ void initTransBankFinish() {
                             }
                         else if( uTo >= target->numUses - 1 ) {
                             tp.toID = newTarget->id;
-                            tp.noChangeID = newTarget->id;
+                            if( dir == 1 && tp.fromID != -1 ) {
+                                // transition back to parent object
+                                // if we have a use chance, it should
+                                // apply here too, leaving us at last use dummy
+                                // object if use chance doesn't happen.
+                                tp.noChangeID = tp.fromID;
+                                }
+                            else {
+                                tp.noChangeID = newTarget->id;
+                                }
                             }
                         
                         if( tp.fromID != -1 && tp.toID != -1 ) {
@@ -760,19 +929,34 @@ void initTransBankFinish() {
                     }
                 else {
                     // default
-                    // at least one
-                    TransIDPair tp = { tr->target, tr->newTarget, 
-                                       tr->newTarget };
-                    targetSteps.push_back( tp );
-                    
-                    if( target != NULL && target->numUses > 1 ) {
-                        // apply to all target dummies
-                        for( int u=0; u<target->numUses-1; u++ ) {
-                            tp.fromID = target->useDummyIDs[u];
-                            targetSteps.push_back( tp );
+
+                    if( target != NULL &&
+                        tr->reverseUseTarget && 
+                        newTarget != NULL && newTarget->numUses > 1 ) {
+
+                        TransIDPair tp = { target->id, 
+                                           newTarget->useDummyIDs[0] };
+                        targetSteps.push_back( tp );
+                        }
+                    else {
+                        // at least one
+                        TransIDPair tp = { tr->target, tr->newTarget, 
+                                           tr->newTarget };
+                        targetSteps.push_back( tp );
+                        
+                        if( target != NULL && target->numUses > 1 ) {
+                            // apply to all target dummies
+                            for( int u=0; u<target->numUses-1; u++ ) {
+                                float useFraction = 
+                                    (float)( u+1 ) / (float)( target->numUses );
+                                
+                                if( useFraction >= tr->targetMinUseFraction ) {
+                                    tp.fromID = target->useDummyIDs[u];
+                                    targetSteps.push_back( tp );
+                                    }
+                                }
                             }
                         }
-
                     }
                 
                 if( actorDecrement || targetDecrement ) {
@@ -896,15 +1080,21 @@ void initTransBankFinish() {
                                 }
 
                             for( int u=0; u<target->numUses-1; u++ ) {
-                                newTrans.target = target->useDummyIDs[u];
+                                float useFraction = 
+                                    (float)( u+1 ) / (float)( target->numUses );
+                            
+                                if( useFraction >= tr->targetMinUseFraction ) {
+
+                                    newTrans.target = target->useDummyIDs[u];
                                 
-                                if( mapNewTarget ) {
-                                    // pass through
-                                    newTrans.newTarget = 
-                                        newTarget->useDummyIDs[u];
+                                    if( mapNewTarget ) {
+                                        // pass through
+                                        newTrans.newTarget = 
+                                            newTarget->useDummyIDs[u];
+                                        }
+                                    
+                                    transToAdd.push_back( newTrans );
                                     }
-                                
-                                transToAdd.push_back( newTrans );
                                 }
                             }
                         }
@@ -928,15 +1118,21 @@ void initTransBankFinish() {
                                 }
                             
                             for( int u=0; u<actor->numUses-1; u++ ) {
-                                newTrans.actor = actor->useDummyIDs[u];
+                                float useFraction = 
+                                    (float)( u+1 ) / (float)( actor->numUses );
+                            
+                                if( useFraction >= tr->actorMinUseFraction ) {
 
-                                if( mapNewActor ) {
-                                    // pass through
-                                    newTrans.newActor = 
-                                        newActor->useDummyIDs[u];
+                                    newTrans.actor = actor->useDummyIDs[u];
+
+                                    if( mapNewActor ) {
+                                        // pass through
+                                        newTrans.newActor = 
+                                            newActor->useDummyIDs[u];
+                                        }
+                                    
+                                    transToAdd.push_back( newTrans );
                                     }
-
-                                transToAdd.push_back( newTrans );
                                 }
                             }
                         }
@@ -955,15 +1151,20 @@ void initTransBankFinish() {
                             }
                         
                         for( int u=0; u<target->numUses-1; u++ ) {
-                            newTrans.target = target->useDummyIDs[u];
+                            float useFraction = 
+                                (float)( u+1 ) / (float)( target->numUses );
                             
-                            if( mapNewTarget ) {
-                                // pass through
-                                newTrans.newTarget = 
-                                    newTarget->useDummyIDs[u];
+                            if( useFraction >= tr->targetMinUseFraction ) {
+                                newTrans.target = target->useDummyIDs[u];
+                            
+                                if( mapNewTarget ) {
+                                    // pass through
+                                    newTrans.newTarget = 
+                                        newTarget->useDummyIDs[u];
+                                    }
+                                
+                                transToAdd.push_back( newTrans );
                                 }
-                            
-                            transToAdd.push_back( newTrans );
                             }
                         }
                     }
@@ -981,15 +1182,20 @@ void initTransBankFinish() {
                             }
                             
                         for( int u=0; u<actor->numUses-1; u++ ) {
-                            newTrans.actor = actor->useDummyIDs[u];
-
-                            if( mapNewActor ) {
-                                // pass through
-                                newTrans.newActor = 
-                                    newActor->useDummyIDs[u];
+                            float useFraction = 
+                                (float)( u+1 ) / (float)( actor->numUses );
+                            
+                            if( useFraction >= tr->actorMinUseFraction ) {
+                                newTrans.actor = actor->useDummyIDs[u];
+                                
+                                if( mapNewActor ) {
+                                    // pass through
+                                    newTrans.newActor = 
+                                        newActor->useDummyIDs[u];
+                                    }
+                                
+                                transToAdd.push_back( newTrans );
                                 }
-
-                            transToAdd.push_back( newTrans );
                             }
                         }
                     }
@@ -1005,7 +1211,7 @@ void initTransBankFinish() {
                     
                     if( actor != NULL && actor->numUses > 1 ) {
                         
-                        for( int u=0; u<actor->numUses-2; u++ ) {
+                        for( int u=0; u<actor->numUses-1; u++ ) {
                             float useFraction = 
                                 (float)( u+1 ) / (float)( actor->numUses );
                             
@@ -1592,20 +1798,31 @@ TransRecord *getTrans( int inActor, int inTarget, char inLastUseActor,
     }
 
 
+#include "objectMetadata.h"
+
 
 #define NUM_CHANCE_RECORDS 100
 static int nextChanceRecord;
 static TransRecord chanceRecords[NUM_CHANCE_RECORDS];
 
-static int randSeed = 124567;
 
 #include "minorGems/util/random/CustomRandomSource.h"
-static CustomRandomSource randSource( randSeed );
+static CustomRandomSource randSource;
 
 
 TransRecord *getPTrans( int inActor, int inTarget, 
                         char inLastUseActor,
                         char inLastUseTarget ) {
+    
+    int actorMeta = extractMetadataID( inActor );
+    int targetMeta = extractMetadataID( inTarget );
+
+    if( actorMeta != 0 )
+        inActor = extractObjectID( inActor );
+
+    if( targetMeta != 0 )
+        inTarget = extractObjectID( inTarget );
+
 
     TransRecord *r = getTrans( inActor, inTarget, 
                                inLastUseActor, inLastUseTarget );
@@ -1614,7 +1831,12 @@ TransRecord *getPTrans( int inActor, int inTarget,
         return r;
         }
     
-    if( r->actorChangeChance == 1.0f && r->targetChangeChance == 1.0f ) {
+    char actorProbSet = isProbabilitySet( r->newActor );
+    char targetProbSet = isProbabilitySet( r->newTarget );
+
+    if( r->actorChangeChance == 1.0f && r->targetChangeChance == 1.0f &&
+        actorMeta == 0 && targetMeta == 0 
+        && ! actorProbSet && ! targetProbSet ) {
         return r;
         }
     
@@ -1639,6 +1861,33 @@ TransRecord *getPTrans( int inActor, int inTarget,
             r->targetChangeChance ) {
             // no change to target
             rStatic->newTarget = rStatic->newTargetNoChange;
+            }
+        }
+
+    if( actorProbSet ) {
+        rStatic->newActor = pickFromProbSet( rStatic->newActor );
+        }
+    if( targetProbSet ) {
+        rStatic->newTarget = pickFromProbSet( rStatic->newTarget );
+        }
+    
+    
+    int passThroughMeta = actorMeta;
+    
+    if( actorMeta == 0 ) {
+        passThroughMeta = targetMeta;
+        }
+
+    if( passThroughMeta != 0 ) {
+        if( rStatic->newActor > 0 &&
+            getObject( rStatic->newActor )->mayHaveMetadata ) {
+            rStatic->newActor = packMetadataID( rStatic->newActor, 
+                                                passThroughMeta );
+            }
+        else if( rStatic->newTarget > 0 &&
+                 getObject( rStatic->newTarget )->mayHaveMetadata ) {
+            rStatic->newTarget = packMetadataID( rStatic->newTarget, 
+                                                 passThroughMeta );
             }
         }
     
@@ -1728,14 +1977,188 @@ static TransRecord **search( SimpleVector<TransRecord *> inMapToSearch[],
 
 
 
+// returns true if inCatID is NOT a pattern, too
+static char isTransPartOfPattern( int inCatID, TransRecord *inTrans ) {
+    CategoryRecord *catRec = getCategory( inCatID );
+    
+    if( catRec == NULL ) {
+        return true;
+        }
+    if( ! catRec->isPattern ) {
+        return true;
+        }
+
+    int patternSize = catRec->objectIDSet.size();
+    
+    CategoryRecord *actorCat = NULL;
+    CategoryRecord *targetCat = NULL;
+    
+    if( inTrans->actor > 0 ) {
+        actorCat = getCategory( inTrans->actor );
+        }
+    if( inTrans->target > 0 ) {
+        targetCat = getCategory( inTrans->target );
+        }
+    
+    char actorInPattern = false;
+    char targetInPattern = false;
+    
+    if( actorCat != NULL &&
+        actorCat->isPattern &&
+        actorCat->objectIDSet.size() == patternSize ) {
+        actorInPattern = true;
+        }
+    else if( targetCat != NULL &&
+             targetCat->isPattern &&
+             targetCat->objectIDSet.size() 
+             == patternSize ) {
+        targetInPattern = true;
+        }
+    
+    if( !actorInPattern && !targetInPattern ) {
+        return false;
+        }
+    return true;
+    }
+
+
+
+static TransRecord **searchWithCategories( 
+    SimpleVector<TransRecord *> inMapToSearch[],
+    int inID, 
+    int inNumToSkip, 
+    int inNumToGet, 
+    int *outNumResults, int *outNumRemaining ) {
+
+
+    if( inID >= mapSize ) {
+        return NULL;
+        }
+
+    int numRecords = inMapToSearch[inID].size();
+
+    ReverseCategoryRecord *catRec = getReverseCategory( inID );
+
+    int extraRecords = 0;
+
+    if( catRec != NULL ) {
+        for( int i=0; i< catRec->categoryIDSet.size(); i++ ) {
+            int catID = catRec->categoryIDSet.getElementDirect( i );
+            if( catID < mapSize ) {
+                
+                for( int j=0; j<inMapToSearch[ catID ].size(); j++ ) {
+                    if( isTransPartOfPattern( 
+                            catID, 
+                            inMapToSearch[ catID ].getElementDirect( j ) ) ) {
+                        
+                        extraRecords ++;
+                        }
+                    }
+                }
+            }
+        }
+    
+    
+    TransRecord **initialResult = 
+        search( inMapToSearch, inID, inNumToSkip, inNumToGet,
+                outNumResults, outNumRemaining );
+    if( inNumToGet == *outNumResults || extraRecords == 0 ) {
+        *outNumRemaining += extraRecords;
+        return initialResult;
+        }
+    else if( extraRecords > 0 ) {
+        // ran out of main results, need to go into category results
+
+        
+        SimpleVector<TransRecord *> results;
+        for( int r=0; r<*outNumResults; r++ ) {
+            results.push_back( initialResult[r] );
+            }
+        
+        if( initialResult != NULL ) {
+            delete [] initialResult;
+            }
+        
+        inNumToSkip -= numRecords;
+        if( inNumToSkip < 0 ) {
+            inNumToSkip = 0;
+            }
+        
+        int numRemaining = extraRecords - inNumToSkip;
+        int i = 0;
+        
+        while( i < catRec->categoryIDSet.size() &&
+               *outNumResults < inNumToGet ) {
+            int numLeftToGet = inNumToGet - *outNumResults;
+
+            int catID = catRec->categoryIDSet.getElementDirect( i );
+            int catTransSize = 0;
+            if( catID < mapSize ) {
+                
+                catTransSize = inMapToSearch[ catID ].size();
+                }
+            
+            int catNumResults = 0;
+            int catNumRemaining = 0;
+            
+            TransRecord **catResult = 
+                search( inMapToSearch, catID, 
+                        inNumToSkip, numLeftToGet,
+                        &catNumResults, &catNumRemaining );
+            if( catResult != NULL ) {
+                for( int r=0; r<catNumResults; r++ ) {
+                    
+                    // if cat is a pattern...
+                    // make sure at least one of actor or target 
+                    // is also part of pattern, else pattern does not apply
+                    if( ! isTransPartOfPattern( catID, catResult[r] ) ) {
+                        ( *outNumResults ) --;
+                        continue;
+                        }
+                    
+                    results.push_back( catResult[r] );
+                    }
+                delete [] catResult;
+                *outNumResults += catNumResults;
+
+                numRemaining -= catNumResults;                
+                }
+            
+            inNumToSkip -= catTransSize;
+            if( inNumToSkip < 0 ) {
+                inNumToSkip = 0;
+                }
+            
+            i++;
+            }
+        *outNumResults = results.size();
+        *outNumRemaining = numRemaining;
+        return results.getElementArray();
+        }
+    else {
+        return NULL;
+        }
+
+
+
+
+    }
+
+
 
 TransRecord **searchUses( int inUsesID, 
                           int inNumToSkip, 
                           int inNumToGet, 
                           int *outNumResults, int *outNumRemaining ) {
-    
-    return search( usesMap, inUsesID, inNumToSkip, inNumToGet,
-                   outNumResults, outNumRemaining );
+
+    if( autoGenerateCategoryTransitions ) {
+        return search( usesMap, inUsesID, inNumToSkip, inNumToGet,
+                       outNumResults, outNumRemaining );
+        }
+    else {
+        return searchWithCategories( usesMap, inUsesID, inNumToSkip, inNumToGet,
+                                     outNumResults, outNumRemaining );
+        }
     }
 
 
@@ -1745,8 +2168,15 @@ TransRecord **searchProduces( int inProducesID,
                               int inNumToGet, 
                               int *outNumResults, int *outNumRemaining ) {
     
-    return search( producesMap, inProducesID, inNumToSkip, inNumToGet,
-                   outNumResults, outNumRemaining );
+    if( autoGenerateCategoryTransitions ) {        
+        return search( producesMap, inProducesID, inNumToSkip, inNumToGet,
+                       outNumResults, outNumRemaining );
+        }
+    else {
+        return searchWithCategories(
+            producesMap, inProducesID, inNumToSkip, inNumToGet,
+            outNumResults, outNumRemaining );
+        }
     }
 
 
@@ -1956,7 +2386,7 @@ void addTrans( int inActor, int inTarget,
         t->targetMinUseFraction = inTargetMinUseFraction;
         
         t->move = inMove;
-        t->desiredMoveDist = inMove;
+        t->desiredMoveDist = inDesiredMoveDist;
         
         t->actorChangeChance = inActorChangeChance;
         t->targetChangeChance = inTargetChangeChance;
@@ -2264,6 +2694,21 @@ char isGrave( int inObjectID ) {
     if( r->deathMarker ) {
         return true;
         }
+    
+    // first, see if this decays into a grave in one step
+
+    TransRecord *trans = getTrans( -1, inObjectID );
+    
+    if( trans != NULL && trans->newTarget > 0 ) {
+        
+        ObjectRecord *nextR = getObject( trans->newTarget );
+
+        if( nextR != NULL && nextR->deathMarker ) {
+            return true;
+            }
+        }
+    
+    
 
     SimpleVector<int> seenIDs;
     

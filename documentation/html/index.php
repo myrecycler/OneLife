@@ -1,3 +1,5 @@
+<?php include( "cacheTop.php" ); ?>
+
 <?php include( "header.php" ); ?>
 
 <?php include( "reviewPages/reviewCount.php" ); ?>
@@ -107,7 +109,7 @@ if( $rs_reviewCount > 0 ) {
    showPayLinks( true );
 ?>
 
-<center><iframe title="YouTube video player" width="640" height="390" src="http://www.youtube.com/embed/mT4JktcVQuE?rel=0" frameborder="0" allowfullscreen></iframe></center>
+<center><iframe title="YouTube video player" width="640" height="390" src="https://www.youtube.com/embed/mT4JktcVQuE?rel=0" frameborder="0" allowfullscreen></iframe></center>
 
 <br>
 
@@ -170,7 +172,7 @@ Sign up for release announcement emails: <input type="text" name="email" value="
 <br>
 -->
 
-<center><iframe title="YouTube video player" width="640" height="390" src="http://www.youtube.com/embed/riqu2eszsIg?rel=0" frameborder="0" allowfullscreen></iframe></center>
+<center><iframe title="YouTube video player" width="640" height="390" src="https://www.youtube.com/embed/riqu2eszsIg?rel=0" frameborder="0" allowfullscreen></iframe></center>
     
 <br><br>
     
@@ -201,7 +203,7 @@ You can take a look at the <a href="requirements.php">system requirements</a>.</
 <br>
 <br>
 
-     
+<center><iframe title="YouTube video player" width="640" height="390" src="https://www.youtube.com/embed/ym1eIhprFlU?rel=0" frameborder="0" allowfullscreen></iframe></center>   
 
 <br>
 <br>
@@ -320,6 +322,8 @@ echo "<center>[<a href=artLogPage.php>More Artwork...</a>]</center>";
 
 $numNewsPerPage = 1;
 $newsSummaryOnly = 1;
+$newsForumID = 4;
+$newsLinkPage = "newsPage.php";
 include( "news.php" );
 
 ?>
@@ -330,6 +334,44 @@ include( "news.php" );
 <br>
 
 <br>
+
+
+
+<?php
+
+$numNewsPerPage = 1;
+$newsSummaryOnly = 1;
+$newsForumID = 8;
+$newsLinkPage = "fanArtPage.php";
+include( "news.php" );
+
+?>
+<br>
+
+<br>
+
+<br>
+
+<br>
+
+
+<?php
+
+$numNewsPerPage = 1;
+$newsSummaryOnly = 1;
+$newsForumID = 9;
+$newsLinkPage = "userStoriesPage.php";
+include( "news.php" );
+
+?>
+<br>
+
+<br>
+
+<br>
+
+<br>
+
 
 
 <center>
@@ -350,3 +392,8 @@ include( "news.php" );
 
     
 <?php include( "footer.php" ); ?>
+
+    
+<?php include( "cacheBottom.php" ); ?>
+
+    

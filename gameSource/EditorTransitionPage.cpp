@@ -66,6 +66,7 @@ extern Font *smallFont;
 #include "ObjectPickable.h"
 
 static ObjectPickable objectPickable;
+static ObjectPickable objectPickableAlt;
 
 
 #define NUM_MOVE_BUTTONS 8
@@ -100,6 +101,7 @@ EditorTransitionPage::EditorTransitionPage()
                                       "Min Use Fraction", "0123456789.", NULL ),
           mSaveTransitionButton( mainFont, -320, 0, "Save" ),
           mObjectPicker( &objectPickable, +410, 90 ),
+          mObjectPickerAlt( &objectPickableAlt, -540, 0 ),
           mObjectEditorButton( mainFont, 410, 260, "Objects" ),
           mCategoryEditorButton( mainFont, -410, 260, "Categories" ),
           mProducedByNext( smallFont, 180, 260, "Next" ),
@@ -157,6 +159,7 @@ EditorTransitionPage::EditorTransitionPage()
 
     addComponent( &mSaveTransitionButton );
     addComponent( &mObjectPicker );
+    addComponent( &mObjectPickerAlt );
     addComponent( &mObjectEditorButton );
     addComponent( &mCategoryEditorButton );
     addComponent( &mDelButton );
@@ -179,6 +182,7 @@ EditorTransitionPage::EditorTransitionPage()
     mCategoryEditorButton.addActionListener( this );
     
     mObjectPicker.addActionListener( this );
+    mObjectPickerAlt.addActionListener( this );
 
     mSaveTransitionButton.setVisible( false );
     
@@ -450,6 +454,40 @@ static void fillInGenericPersonActor( TransRecord *inRecord ) {
 
 
 
+
+//  inCatID doesn't necessarily have to point to a category object
+// returns 0 if not
+//         1 if in category
+//         2 if in pattern
+static int isObjectInCategory( int inCatID, int inObjectID ) {
+    if( inCatID <= 0 ) {
+        return 0;
+        }
+    
+    CategoryRecord *catRec = getCategory( inCatID );
+    
+    if( catRec == NULL ){
+        return 0;
+        }
+    
+    for( int i=0; i< catRec->objectIDSet.size(); i++ ) {
+        
+        if( catRec->objectIDSet.getElementDirect( i ) == inObjectID ) {
+            if( catRec->isPattern ) {
+                return 2;
+                }
+            else {
+                return 1;
+                }
+            }
+        }
+
+    return 0;
+    }
+
+
+
+
 void EditorTransitionPage::redoTransSearches( int inObjectID,
                                               char inClearSkip ) {
     
@@ -484,6 +522,23 @@ void EditorTransitionPage::redoTransSearches( int inObjectID,
         for( int i=0; i<numResults; i++ ) {
             mProducedBy[i] = *( resultsA[i] );
             
+             mProducedByType[i] = 0;
+
+            if( mProducedBy[i].newActor != inObjectID && 
+                mProducedBy[i].newTarget != inObjectID ) {
+                // transition does not produce inObjectID directly
+                // must be a category transition
+                
+                mProducedByType[i] = isObjectInCategory(
+                    mProducedBy[i].newActor, inObjectID );
+                
+                if( mProducedByType[i] == 0 ) {
+                    mProducedByType[i] = isObjectInCategory(
+                        mProducedBy[i].newTarget, inObjectID );
+                    }
+                }
+            
+
             fillInGenericPersonTarget( &( mProducedBy[i] ) );
             fillInGenericPersonActor(  &( mProducedBy[i] ) );
 
@@ -526,6 +581,23 @@ void EditorTransitionPage::redoTransSearches( int inObjectID,
         for( int i=0; i<numResults; i++ ) {
             mProduces[i] = *( resultsB[i] );
             
+            mProducesType[i] = 0;
+            
+            if( mProduces[i].actor != inObjectID && 
+                mProduces[i].target != inObjectID ) {
+                // transition does not use inObjectID directly
+                // must be a category transition
+                
+                mProducesType[i] = isObjectInCategory(
+                    mProduces[i].actor, inObjectID );
+                
+                if( mProducesType[i] == 0 ) {
+                    mProducesType[i] = isObjectInCategory(
+                        mProduces[i].target, inObjectID );
+                    }
+                }
+                
+
             fillInGenericPersonTarget( &( mProduces[i] ) );
             fillInGenericPersonActor( &( mProduces[i] ) );
             
@@ -702,10 +774,14 @@ void EditorTransitionPage::actionPerformed( GUIComponent *inTarget ) {
 
         redoTransSearches( 0, true );
         }
-    else if( inTarget == &mObjectPicker ) {
+    else if( inTarget == &mObjectPicker ||
+             inTarget == &mObjectPickerAlt ) {
+        
+        Picker *curPicker = (Picker*)inTarget;
+        
         if( mCurrentlyReplacing != -1 ) {
             
-            int objectID = mObjectPicker.getSelectedObject();
+            int objectID = curPicker->getSelectedObject();
             
             if( objectID != -1 ) {
                 setObjectByIndex( &mCurrentTransition, mCurrentlyReplacing,
@@ -850,6 +926,7 @@ void EditorTransitionPage::actionPerformed( GUIComponent *inTarget ) {
                 mCurrentlyReplacing = i;
                 
                 mObjectPicker.unselectObject();
+                mObjectPickerAlt.unselectObject();
 
                 
                 int replacingID = getObjectByIndex( &mCurrentTransition,
@@ -1034,14 +1111,42 @@ void EditorTransitionPage::draw( doublePair inViewCenter,
             doublePair pos = mProducedByButtons[i]->getCenter();
             
             pos.x -= 75;
-            setDrawColor( 1, 1, 1, 1 );
+
+            const char *noteString = "";
+            
+            if( mProducedByType[i] == 1 ) {
+                setDrawColor( 1, 1, 0.5, 1 );
+                noteString = "From Category:";
+                }
+            else if( mProducedByType[i] == 2 ) {
+                setDrawColor( 1, 0.75, 0.75, 1 );
+                noteString = "From Pattern:";
+                }
+            else {
+                setDrawColor( 1, 1, 1, 1 );
+                }
+            
+            doublePair notePos = pos;
+            notePos.x -= 48;
+            notePos.y += 60;
+            smallFont->drawString( noteString, 
+                                   notePos, alignLeft );
+
             drawSquare( pos, 50 );
 
             
             drawTransObject( actor, pos );
             
             pos.x += 150;
-            setDrawColor( 1, 1, 1, 1 );
+            if( mProducedByType[i] == 1 ) {
+                setDrawColor( 1, 1, 0.5, 1 );
+                }
+            else if( mProducedByType[i] == 2 ) {
+                setDrawColor( 1, 0.75, 0.75, 1 );
+                }
+            else {
+                setDrawColor( 1, 1, 1, 1 );
+                }
             drawSquare( pos, 50 );
 
             // target always non-blank
@@ -1058,14 +1163,41 @@ void EditorTransitionPage::draw( doublePair inViewCenter,
         
             pos.x -= 75;
             
-            setDrawColor( 1, 1, 1, 1 );
+            const char *noteString = "";
+
+            if( mProducesType[i] == 1 ) {
+                setDrawColor( 1, 1, 0.5, 1 );
+                noteString = "From Category:";
+                }
+            else if( mProducesType[i] == 2 ) {
+                setDrawColor( 1, 0.75, 0.75, 1 );
+                noteString = "From Pattern:";
+                }
+            else {
+                setDrawColor( 1, 1, 1, 1 );
+                }
+
+            doublePair notePos = pos;
+            notePos.x -= 48;
+            notePos.y += 60;
+            smallFont->drawString( noteString, 
+                                   notePos, alignLeft );
+
             drawSquare( pos, 50 );
             
             drawTransObject( newActor, pos );
             
             pos.x += 150;
             
-            setDrawColor( 1, 1, 1, 1 );
+            if( mProducesType[i] == 1 ) {
+                setDrawColor( 1, 1, 0.5, 1 );
+                }
+            else if( mProducesType[i] == 2 ) {
+                setDrawColor( 1, 0.75, 0.75, 1 );
+                }
+            else {
+                setDrawColor( 1, 1, 1, 1 );
+                }
             drawSquare( pos, 50 );
             
             drawTransObject( newTarget, pos );
@@ -1079,7 +1211,7 @@ void EditorTransitionPage::draw( doublePair inViewCenter,
 
         doublePair pos = mPickButtons[1]->getCenter();
 
-        pos.y += 95;
+        pos.y += 110;
         
         setDrawColor( 1, 1, 1, 1 );
         
@@ -1223,6 +1355,7 @@ void EditorTransitionPage::makeActive( char inFresh ) {
         }
     
     mObjectPicker.redoSearch( false );
+    mObjectPickerAlt.redoSearch( false );
 
     }
 

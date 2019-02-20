@@ -6,10 +6,14 @@
 #include "minorGems/util/SimpleVector.h"
 #include "minorGems/util/stringUtils.h"
 
+#include "minorGems/util/random/JenkinsRandomSource.h"
+
 #include "minorGems/io/file/File.h"
 
 #include "folderCache.h"
 
+
+static JenkinsRandomSource randSource;
 
 
 static int mapSize;
@@ -93,7 +97,20 @@ float initCategoryBankStep() {
                     }
                 
                 next++;
-                            
+                
+                r->isPattern = false;
+                r->isProbabilitySet = false;
+                
+                if( strstr( lines[next], "pattern" ) != NULL ) {
+                    r->isPattern = true;
+                    next++;
+                    }
+                else if( strstr( lines[next], "probSet" ) != NULL ) {
+                    r->isProbabilitySet = true;
+                    next++;
+                    }
+                
+
                 int numObjects = 0;
                 sscanf( lines[next], "numObjects=%d", 
                         &( numObjects ) );
@@ -102,9 +119,14 @@ float initCategoryBankStep() {
 
                 for( int i=0; i<numObjects; i++ ) {
                     int objID = 0;
+                    float prob = 0.0f;
                     
-                    sscanf( lines[next], "%d", 
-                            &( objID ) );
+                    if( r->isProbabilitySet ) {
+                        sscanf( lines[next], "%d %f", &objID, &prob );
+                        }
+                    else {
+                        sscanf( lines[next], "%d", &objID );
+                        }
                     
                     next++;
                     
@@ -113,6 +135,7 @@ float initCategoryBankStep() {
                             maxObjectID = objID;
                             }
                         r->objectIDSet.push_back( objID );
+                        r->objectWeights.push_back( prob );
                         }
                     }
                 
@@ -302,15 +325,31 @@ void saveCategoryToDisk( int inParentID ) {
         SimpleVector<char*> lines;
         
         lines.push_back( autoSprintf( "parentID=%d", inParentID ) );
+
+        if( r->isPattern ) {
+            lines.push_back( stringDuplicate( "pattern" ) );
+            }
+        else if( r->isProbabilitySet ) {
+            lines.push_back( stringDuplicate( "probSet" ) );
+            }
         
         // start with 0 objects in a new category
         lines.push_back( autoSprintf( "numObjects=%d", 
                                       r->objectIDSet.size() ) );
         
         for( int i=0; i<r->objectIDSet.size(); i++ ) {
-            lines.push_back( 
-                autoSprintf( "%d", r->objectIDSet.getElementDirect(i) ) );
+            if( r->isProbabilitySet ) {
+                lines.push_back( 
+                    autoSprintf( "%d %f", 
+                                 r->objectIDSet.getElementDirect(i),
+                                 r->objectWeights.getElementDirect(i) ) );
+                }
+            else {
+                lines.push_back( 
+                    autoSprintf( "%d", r->objectIDSet.getElementDirect(i) ) );
+                }
             }
+        
         
         char **linesArray = lines.getElementArray();
         
@@ -331,6 +370,82 @@ void saveCategoryToDisk( int inParentID ) {
     delete categoryFile;
     
     return;
+    }
+
+
+
+static void autoAdjustWeights( int inParentID, int inHoldIndex = -1 ) {
+    
+    CategoryRecord *r = getCategory( inParentID );
+    if( r != NULL && r->isProbabilitySet ) {        
+        
+        float weightSum = 0;
+        
+        for( int i=0; i< r->objectWeights.size(); i++ ) {
+            
+            weightSum += r->objectWeights.getElementDirect( i );
+            }
+
+        int nextIndex = 0;
+        while( weightSum > 1 ) {
+            float extra = weightSum - 1;
+
+            if( nextIndex == inHoldIndex ) {
+                nextIndex++;
+                }
+
+            if( nextIndex >= r->objectWeights.size() ) {
+                break;
+                }
+            
+            float weight = r->objectWeights.getElementDirect( nextIndex );
+            
+            if( weight > extra ) {
+                weight -= extra;
+                weightSum -= extra;
+                }
+            else {
+                weightSum -= weight;
+                weight = 0;
+                }
+            
+            *( r->objectWeights.getElement( nextIndex ) ) = weight;
+
+            nextIndex ++;
+            
+            if( nextIndex >= r->objectWeights.size() ) {
+                break;
+                }
+            }
+        
+        nextIndex = 0;
+        while( weightSum < 1 ) {
+            float extra = 1 - weightSum;
+
+            if( nextIndex == inHoldIndex ) {
+                nextIndex++;
+                }
+            if( nextIndex >= r->objectWeights.size() ) {
+                break;
+                }
+            
+            float weight = r->objectWeights.getElementDirect( nextIndex );
+            
+            if( weight + extra <= 1 ) {
+                weight += extra;
+                weightSum += extra;
+                }
+            // else weird case that should never happen
+            
+            *( r->objectWeights.getElement( nextIndex ) ) = weight;
+
+            nextIndex ++;
+            
+            if( nextIndex >= r->objectWeights.size() ) {
+                break;
+                }
+            }
+        }    
     }
 
 
@@ -381,6 +496,8 @@ static void addCategory( int inParentID ) {
     CategoryRecord *r = new CategoryRecord;
     
     r->parentID = inParentID;
+    r->isPattern = false;
+    r->isProbabilitySet = false;
     
     idMap[ inParentID ] = r;
     
@@ -461,6 +578,8 @@ void addCategoryToObject( int inObjectID, int inParentID ) {
             }
 
         r->objectIDSet.push_back( inObjectID );
+        r->objectWeights.push_back( 0.0f );
+        autoAdjustWeights( inParentID );
         
         ReverseCategoryRecord *rr = getReverseCategory( inObjectID );
 
@@ -482,13 +601,68 @@ void addCategoryToObject( int inObjectID, int inParentID ) {
 
 
 
+
+void setCategoryIsPattern( int inParentID, char inIsPattern ) {
+    CategoryRecord *r = getCategory( inParentID );
+    
+    if( r != NULL ) {
+        r->isPattern = inIsPattern;
+        if( r->isPattern ) {
+            r->isProbabilitySet = false;
+            // zero all weights
+            for( int i=0; i< r->objectWeights.size(); i++ ) {
+                *( r->objectWeights.getElement( i ) ) = 0;
+                }
+            }
+        saveCategoryToDisk( inParentID );
+        }
+    }
+
+
+
+void setCategoryIsProbabilitySet( int inParentID, char inIsProbabilitySet ) {
+    CategoryRecord *r = getCategory( inParentID );
+    
+    if( r != NULL ) {
+        char oldVal = r->isProbabilitySet;
+        r->isProbabilitySet = inIsProbabilitySet;
+        if( r->isProbabilitySet ) {
+            r->isPattern = false;
+            if( !oldVal ) {
+                // all zero weights, fix it
+                if( r->objectWeights.size() > 0 ) {
+                    *( r->objectWeights.getElement( 0 ) ) = 1;
+                    }
+                }
+            }
+        else {
+            // zero all weights
+            for( int i=0; i< r->objectWeights.size(); i++ ) {
+                *( r->objectWeights.getElement( i ) ) = 0;
+                }
+            }
+        saveCategoryToDisk( inParentID );
+        }
+    }
+
+
+
+
 void removeCategoryFromObject( int inObjectID, int inParentID ) {
     CategoryRecord *r = getCategory( inParentID );
     
     if( r != NULL ) {
 
-        r->objectIDSet.deleteElementEqualTo( inObjectID );
+        int index = r->objectIDSet.getElementIndex( inObjectID );
         
+        if( index != -1 ) {
+            r->objectIDSet.deleteElement( index );
+            r->objectWeights.deleteElement( index );
+            }
+
+        autoAdjustWeights( inParentID );
+        
+
         ReverseCategoryRecord *rr = getReverseCategory( inObjectID );
         
         if( rr != NULL ) {    
@@ -515,7 +689,12 @@ void removeObjectFromAllCategories( int inObjectID ) {
             CategoryRecord *r = getCategory( cID );
                 
             if( r != NULL ) {
-                r->objectIDSet.deleteElementEqualTo( inObjectID );
+                int index = r->objectIDSet.getElementIndex( inObjectID );
+                
+                if( index != -1 ) {
+                    r->objectIDSet.deleteElement( index );
+                    r->objectWeights.deleteElement( index );
+                    }
                 
                 saveCategoryToDisk( cID );
                 }
@@ -529,6 +708,9 @@ void removeObjectFromAllCategories( int inObjectID ) {
 
 
 
+// NOTE:
+// implementation not functional, because reverse records not stored on 
+// disk currently
 void moveCategoryUp( int inObjectID, int inParentID ) {
     ReverseCategoryRecord *rr = getReverseCategory( inObjectID );
         
@@ -553,6 +735,9 @@ void moveCategoryUp( int inObjectID, int inParentID ) {
 
 
 
+// NOTE:
+// implementation not functional, because reverse records not stored on 
+// disk currently
 void moveCategoryDown( int inObjectID, int inParentID ) {
     ReverseCategoryRecord *rr = getReverseCategory( inObjectID );
         
@@ -575,6 +760,109 @@ void moveCategoryDown( int inObjectID, int inParentID ) {
         }
     
     }
+
+
+
+
+
+void moveCategoryMemberUp( int inParentID, int inObjectID ) {
+
+    CategoryRecord *r = getCategory( inParentID );
+    
+    if( r != NULL ) {        
+        int index = r->objectIDSet.getElementIndex( inObjectID );
+        
+        if( index != -1 && index != 0 ) {
+            
+            int *id = r->objectIDSet.getElement( index );
+            int *idToSwapWith = r->objectIDSet.getElement( index - 1 );
+
+            int temp = *idToSwapWith;
+
+            *idToSwapWith = *id;
+            *id = temp;
+            
+            float *prob = r->objectWeights.getElement( index );
+            float *probToSwapWith = r->objectWeights.getElement( index - 1 );
+
+            float tempProb = *probToSwapWith;            
+
+            *probToSwapWith = *prob;
+            *prob = tempProb;
+
+            saveCategoryToDisk( inParentID );
+            }
+        }
+    }
+
+
+
+
+void moveCategoryMemberDown( int inParentID, int inObjectID ) {
+
+    CategoryRecord *r = getCategory( inParentID );
+    
+    if( r != NULL ) {        
+        int index = r->objectIDSet.getElementIndex( inObjectID );
+        
+        if( index != -1 && 
+            index != r->objectIDSet.size() - 1 ) {
+            
+            int *id = r->objectIDSet.getElement( index );
+            int *idToSwapWith = r->objectIDSet.getElement( index + 1 );
+            
+            int temp = *idToSwapWith;            
+
+            *idToSwapWith = *id;
+            *id = temp;
+
+            float *prob = r->objectWeights.getElement( index );
+            float *probToSwapWith = r->objectWeights.getElement( index + 1 );
+
+            float tempProb = *probToSwapWith;            
+
+            *probToSwapWith = *prob;
+            *prob = tempProb;
+
+            saveCategoryToDisk( inParentID );
+            }
+        }
+    }
+
+
+
+void setMemberWeight( int inParentID, int inObjectID, float inWeight ) {
+
+    CategoryRecord *r = getCategory( inParentID );
+    if( r != NULL && r->isProbabilitySet ) {        
+        int index = r->objectIDSet.getElementIndex( inObjectID );
+        
+        if( index != -1 ) {
+            
+            *( r->objectWeights.getElement( index ) ) = inWeight;
+            autoAdjustWeights( inParentID, index );
+            }
+        saveCategoryToDisk( inParentID );
+        }
+    }
+
+
+
+void makeWeightUniform( int inParentID ) {
+    CategoryRecord *r = getCategory( inParentID );
+    if( r != NULL && r->isProbabilitySet ) {        
+        
+        int num = r->objectWeights.size();
+        
+        float uniformWeight = 1.0f / num;
+        
+        for( int i=0; i<num; i++ ) {
+            *( r->objectWeights.getElement( i ) ) = uniformWeight;
+            }
+        saveCategoryToDisk( inParentID );
+        }
+    }
+
 
 
 
@@ -621,4 +909,33 @@ char isObjectUsedInCategories( int inObjectID ) {
 
 
 
+
+int pickFromProbSet( int inParentID ) {
+    CategoryRecord *r = getCategory( inParentID );
+
+    float pick = randSource.getRandomFloat();
+    
+    float weightSum = 0;
+    
+    for( int i=0; i<  r->objectIDSet.size(); i++ ) {
+        weightSum += r->objectWeights.getElementDirect( i );
+        
+        if( weightSum >= pick ) {
+            return r->objectIDSet.getElementDirect( i );
+            }
+        }
+    
+    // weights didn't sum to 1?
+    return inParentID;
+    }
+
+
+
+char isProbabilitySet( int inParentID ) {
+    CategoryRecord *r = getCategory( inParentID );
+    if( r != NULL && r->isProbabilitySet ) { 
+        return true;
+        }
+    return false;
+    }
 

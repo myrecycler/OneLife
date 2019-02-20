@@ -56,26 +56,40 @@ Client login proceedure.
     
 SN
 current_players/max_players
-sequence_number
+challenge_string
+required_version_number
 #
 
-Where sequence_number is a positive integer in base-10 ascii.
+Where challenge_string is an ascii string, less than 150 characters long.
+
+
+
 
 
 2.  The client MUST respond with the following login message:
 
-LOGIN email password_hash account_key_hash#
+LOGIN email password_hash account_key_hash tutorial_number twin_code_hash twin_count#
 
 
 password_hash is based on the server access password, and is computed by:
 
-HMAC_SHA1( password, sequence_number )
+HMAC_SHA1( password, challenge_string )
 
 
 account_key_hash is based on the client's account key, all uppercase with
 hyphens removed, and is computed by:
 
-HMAC_SHA1( account_key, sequence_number )
+HMAC_SHA1( account_key, challenge_string )
+
+
+tutorial_number specifies the tutorail map number to load, or 0 for normal game.
+
+
+twin_code_hash is optional.  The sha1 hash of the twin code.
+
+twin_count is mandatory if twin_code_hash is present.  How many twins are in
+the party, total.
+
 
 
 3.  The server responds with one of:
@@ -113,9 +127,15 @@ PLAYER_OUT_OF_RANGE (PO)
 
 PLAYER_SAYS (PS)
 
+LOCATION_SAYS (LS)
+
+PLAYER_EMOT (PE)
+
 MAP_CHANGE (MX)
 
 FOOD_CHANGE (FX)
+
+HEAT_CHANGE (HX)
 
 LINEAGE (LN)
 
@@ -123,13 +143,43 @@ NAME (NM)
 
 APOCALYPSE (AP)
 
+APOCALYPSE_DONE (AD)
+
 DYING (DY)
+
+HEALED (HE)
 
 MONUMENT_CALL (MN)
 
+GRAVE (GV)
+
+GRAVE_MOVE (GM)
+
+CURSED (CU)
+
+CURSE_TOKEN_CHANGE (CX)
+
+CURSE_SCORE_CHANGE (CS)
+
+FLIGHT_DEST (FD)
+
+FORCED_SHUTDOWN (SD)
+
+FRAME (FM)
+
+PONG
 
 
 Client can expect to receive these at any time, and in any order.
+
+
+Each batch of messages from a single server time step will be terminated with
+a FRAME message.  This ensures that related messages can play at the same time
+on the client, regardless of network latency (for example, a player picking
+up an object results in a PLAYER_UPDATE and an MAP_CHANGE message, which only
+make sense if played together client-side).
+
+
 
 
 
@@ -197,12 +247,12 @@ Check the code in map.cpp for details.
 
 
 PU
-p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving force x y age age_r move_speed clothing_set just_ate last_ate_id responsible_id
-p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving force x y age age_r move_speed clothing_set just_ate last_ate_id responsible_id
-p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving force x y age age_r move_speed clothing_set responsible_id
-p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving force x y age age_r move_speed clothing_set just_ate last_ate_id responsible_id
+p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving_seqNum force x y age age_r move_speed clothing_set just_ate last_ate_id responsible_id held_yum
+p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving_seqNum force x y age age_r move_speed clothing_set just_ate last_ate_id responsible_id held_yum
+p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving_seqNum force x y age age_r move_speed clothing_set just_ate last_ate_id responsible_id held_yum
+p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving_seqNum force x y age age_r move_speed clothing_set just_ate last_ate_id responsible_id held_yum
 ...
-p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving force x y age age_r move_speed clothing_set just_ate last_ate_id responsible_id
+p_id po_id facing action action_target_x action_target_y o_id o_origin_valid o_origin_x o_origin_y o_transition_source_id heat done_moving_seqNum force x y age age_r move_speed clothing_set just_ate last_ate_id responsible_id held_yum
 #
 
 List of player ids with their display object ids, facing direction, action
@@ -212,7 +262,7 @@ whether held origin is valid (1 or 0), origin position on map of that held
 object (where it was picked up from), 
 transition source object id (or -1) if held object is result of a transition,
 player's current heat value, 
-done_moving flag (to signal destination reached), force flag (to signal
+done_moving_seqNum (to signal destination reached), force flag (to signal
 a move truncated unexpectedly), x,y grid positions of player,
 floating point age in "years", floating point aging rate in sec/year (how many
 seconds it takes the player to age 1 year), and
@@ -229,10 +279,10 @@ action flag is 1 if player is attempting an action, 0 otherwise;
 Heat is the player's warmth between 0 and 1, where 0 is coldest, 1 is hottest,
 and 0.5 is ideal.
 
-If done_moving is 1, this means the player is stationary at this position.
+If done_moving_seqNum is > 0, this means the player is stationary at this position (and this is the sequence number of their last move).
 Otherwise, player may still be in the middle of a move (for example, if what
 they are holding decays while they are moving, a PU will be sent with
-done_moving set to 0).
+done_moving_seqNum set to 0).
 
 force is usually 0 except in special cases of move truncation where it is 1.
 A player receiving force for itself must snap back to that location
@@ -241,7 +291,7 @@ before continuing to move.
 Deleted players reported in update with
 X X 
 for x y
-and a reason string a the tail end of the line.  Reason can be
+and a reason string at the tail end of the line.  Reason can be
 
 reason_disconnected
 reason_killed_id   (where id is the object that killed the player)
@@ -273,8 +323,10 @@ player (baby) that this player is holding.
 
 responsible_id is used to indicate updates that were caused by another
 player (so that client can defer these until responsible player finishes
-local wal).  Current examples involve feeding and clothing a baby.
+local walk).  Current examples involve feeding and clothing a baby.
 -1 if irrelevant.
+
+held_yum is 1 if held item is yummy food, 0 otherwise
 
 
 NOTE:
@@ -334,14 +386,73 @@ they have moved out of range.
 
 
 PS
-p_id text
-p_id text
-p_id text
+p_id/isCurse text
+p_id/isCurse text
+p_id/isCurse text
 ...
-p_id text
+p_id/isCurse text
 #
 
+isCurse is 0 if not a successful curse, or 1 if successful.
+
 Text that each player says must not contain # or newline.
+
+Example:
+
+PS
+1432/0 HELLO THERE
+1501/1 CURSE JOHN SMITH
+1448/0 HELP ME
+#
+
+
+
+
+
+LS
+x y text
+x y text
+x y text
+...
+x y text
+#
+
+Text at each location says must not contain # or newline.
+
+Example:
+
+LS
+0 25 HELLO THERE
+14034 3424 CURSE JOHN SMITH
+-342 3847 HELP ME
+#
+
+
+
+
+
+PE
+p_id emot_index ttl_sec
+p_id emot_index
+p_id emot_index ttl_sec
+...
+p_id emot_index ttl_sec
+#
+
+
+Example:
+
+PE
+1432 4
+1501 6 30
+1448 1
+#
+
+
+ttl_sec is optional, and specifies how long the emote should be shown, in
+seconds, client-side.  If it is omitted, the client should display the emotion
+for the standard amount of time.
+
 
 
 
@@ -387,7 +498,7 @@ with a given speed.
 
 FX
 food_store food_capacity last_ate_id last_ate_fill_max move_speed responsible_id
-#
+ yum_bonus yum_multiplier#
 
 food_store is integer amount of food left in body, capacity is the integer 
 maximum amount of food.
@@ -403,6 +514,18 @@ move_speed is floating point speed in grid square widths per second.
 
 responsible_id is id of player that fed you if you're a baby, or -1
 
+yum_bonus is an integer indicating the current stored bonus food.
+
+yum_multiplier is an integer indicating how many yum bonus points are earned
+when the next yummy food is eaten.
+
+
+
+
+HX
+heat#
+
+Tells player about their current heat value.
 
 
 
@@ -451,12 +574,36 @@ last_name may be ommitted.
 AP
 #
 
-Indicates that an apocalypse is pending (and death is coming).  Gives client
-time to show a visual effect before death-by-apocalypse happens.
+Indicates that an apocalypse is pending.  Gives client
+time to show a visual effect.
+
+
+
+AD
+#
+
+Indicates that an apocalypse is now over.  Client should go back to displaying
+world.
 
 
 
 DY
+p_id isSick
+p_id
+p_id isSick
+
+...
+p_id
+#
+
+Indicates that the listed players have been mortally wounded and will die soon.
+
+isSick is optional 1 flag to indicate that player is sick
+(client shouldn't show blood UI overlay for sick players)
+
+
+
+HE
 p_id
 p_id
 p_id
@@ -464,7 +611,7 @@ p_id
 p_id
 #
 
-Indicates that the listed players have been mortally wounded and will die soon.
+Indicates that the listed players have been healed and are no longer dying.
 
 
 
@@ -483,6 +630,88 @@ of object o_id.
 
 
 
+GV
+x y p_id
+#
+
+
+Grave at x y belongs to player p_id.
+
+
+
+
+GM
+xs ys xd yd
+#
+
+
+Grave at xs,ys moved to xd,yd.
+
+
+
+CU
+p_id level
+p_id level
+...
+p_id level
+#
+
+
+List of player ids that are cursed, and their curse level
+
+
+
+CX
+curse_token_count#
+
+Tells player about how many curse tokens they have
+
+
+
+CS
+excess_curse_points#
+
+Tells player about their curse score, if it is above the threshold.
+
+
+
+FD
+p_id dest_x dest_y
+#
+
+Sent to all players to let them know about new flights.
+
+Flying player should wait for a MAP_CHUNK message around the destination.
+
+
+
+
+SD
+#
+
+Indicates that the server is undergoing a forced shutdown.  Gives client a
+chance to hear about this and close connection before connection is
+force-closed by server.
+
+
+
+
+FM
+#
+
+Indicates the end of a server frame.  All messages since the last FM message
+are part of the same batch and can be played back together on the client.
+
+
+
+PONG
+unique_id#
+
+Sent by server to client in response to PING request.  Server returns
+the unique ID sent by the client.
+
+
+
 
 First message sent upon client new connection to server:
 
@@ -494,15 +723,27 @@ a full player update message for ALL players on entire server.
 
 Clients send moves in the following format:
 
+NOTE that this format is exact, with exactly one space character between
+parameters, and no leading spaces.
+
+
 KA x y#
 USE x y#
 BABY x y#
+BABY x y id#
 SELF x y i#
 UBABY x y i#
+UBABY x y i id#
 REMV x y i#
 SREMV x y c i#
 DROP x y c#
 KILL x y#
+KILL x y id#
+JUMP x y#
+EMOT x y e#
+DIE x y#
+FORCE x y#
+PING x y unique_id#
 
 
 KA   is a keep-alive message used to keep the connection alive when the client
@@ -532,9 +773,20 @@ SELF is special case of USE action taken on self (to eat what we're holding
 	 
 BABY is special case of USE action taken on a baby to pick them up.
      They are dropped with the normal DROP action.
+     NOTE the alternate call for BABY with extra id parameter.
+     this specifies a specific person to pick up, if more than one is
+	 close to the target tile.
 
 UBABY is a special case of SELF applied to a baby (to feed baby food
 	  or add/remove clothing from baby).  Also works on elderly.
+      Note that server currently allows UBABY to feed anyone food, but
+      only putting clothing on babies and elderly.
+      ALSO:  UBABY is used for healing wounded players.
+      Essentially, any action where held item is used on another player.
+      Should be called UOTHER, but UBABY is used for historical reasons.
+      NOTE the alternate call for UBABY with extra id parameter.
+      this specifies a specific person to do the action on, if more than one is
+	  close to the target tile.
 
 REMV is special case of removing an object from a container.
      i specifies the index of the container item to remove, or -1 to
@@ -551,12 +803,48 @@ KILL is for using a deadly object on the target square.  Square can
      be non-adjacent depending on deadly distance of held object.
      If another player is located there (even if moving and crossing)
 	 they will be killed.
+     NOTE the alternate call for KILL with extra id parameter.
+     this specifies a specific person to kill, if more than one is
+	 close to the target tile.
 
+JUMP is used by a baby to jump out of its mother's arms.  The x and y 
+     coordinates are ignored.
+     MOVE can NO LONGER be used to jump out of arms (it was the old way).
+     It was less safe, because bad message interleavings server-side make
+     MOVE ambiguous in the case of jump-out (for example, if the baby
+     has already been dropped by the time the MOVE arrives, the server will
+     interpret it as a legitimate move attempt).
+
+EMOT is used to specify an emotion to display.  The x and y coordinates are
+     ignored.  e is the emotion index.
+
+DIE  is used to trigger sudden infant death for a held baby.  The server
+     enforces various conditions that limit when this command can be effective.
+     (For example, age < 1 and held by mother).  The x and y coordinates are
+     ignored.
+
+FORCE  is used to acknowledge a forced-pos PU sent previously by the server.
+       The x and y coordinates must match the forced position in the PU.
+       Forced-pos PU's act like sync points.  After sending one to the client,
+       the server will ignore all position-sensitive moves and actions until
+       a FORCE arrives, demonstrating that the client is in sync with the forced
+       position, and that subsequent moves carry forward from that forced
+       position (otherwise, additional moves/actions sent by the client after
+       its move that was cut off by the forced-pos PU, but before the client
+       actually receive that PU, can be misinterpreted by the server).
+
+PING is used to request a PONG response fromt the server.  The x and y 
+     coordinates are ignored.  The unique_id parameter will be returned
+     in the PONG response.
 
 
 This one is more complicated:
 
-MOVE xs ys xdelt0 ydelt0 xdelt1 ydelt1 ... xdeltN ydeltN#
+MOVE xs ys @seq_num xdelt0 ydelt0 xdelt1 ydelt1 ... xdeltN ydeltN#
+
+
+seq_num is the sequence number of moves in this player's lifetime, starting
+        with 2 for their first move.
 
 xs,ys is the absolute world position the player thinks they're currently at
 

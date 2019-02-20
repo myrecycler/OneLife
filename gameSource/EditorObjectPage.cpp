@@ -17,6 +17,12 @@
 
 #include "minorGems/io/file/FileInputStream.h"
 
+#include "minorGems/graphics/converters/PNGImageConverter.h"
+
+
+
+static double faceStepAges[NUM_FACES_STEPS] = { 0.4, 4, 14, 30, 40, 55 };
+
 
 
 extern Font *mainFont;
@@ -91,6 +97,8 @@ EditorObjectPage::EditorObjectPage()
                                  false,
                                  "Tm Strch", "0123456789.", NULL ),
           mSlotsLockedCheckbox( -260, -200, 2 ),
+          mNoFlipCheckbox( 460, -260, 2 ),
+          mSideAccessCheckbox( 460, -240, 2 ),
           mDeadlyDistanceField( smallFont, 
                                 150,  -220, 4,
                                 false,
@@ -129,6 +137,8 @@ EditorObjectPage::EditorObjectPage()
           mInvisibleWhenWornCheckbox( 290, 0, 2 ),
           mInvisibleWhenUnwornCheckbox( 290, 0, 2 ),
           mBehindSlotsCheckbox( -190, 0, 2 ),
+          mBehindPlayerCheckbox( -190, 0, 2 ),
+          mAdditiveBlendCheckbox( -190, 0, 2 ),
           mAgeInField( smallFont, 
                        260,  -52, 6,
                        false,
@@ -202,8 +212,15 @@ EditorObjectPage::EditorObjectPage()
           mUsingSoundWidget( smallFont, -50, -310 ),
           mEatingSoundWidget( smallFont, +200, -310 ),
           mDecaySoundWidget( smallFont, +450, -310 ),
-          mCreationSoundInitialOnlyCheckbox( -185, -285, 2 ),
-          mSlotPlaceholderSprite( loadSprite( "slotPlaceholder.tga" ) ) {
+          mCreationSoundInitialOnlyCheckbox( -175, -285, 2 ),
+          mCreationSoundForceCheckbox( -280, -285, 2 ),
+          mSlotPlaceholderSprite( loadSprite( "slotPlaceholder.tga" ) ),
+          mFaceFrameSprite( loadSprite( "faceFrame.tga" ) ),
+          mFaceFrameMaskSprite( loadSprite( "faceFrameMask.tga" ) ),
+          mFaceFrameBackgroundSprite( 
+              loadSprite( "faceFrameBackground.tga" ) ),
+          mFaceFrameImage( readTGAFile( "faceFrame.tga" ) ),
+          mFaceFrameMaskImage( readTGAFile( "faceFrameMask.tga" ) ) {
 
 
     mDragging = false;
@@ -234,6 +251,9 @@ EditorObjectPage::EditorObjectPage()
     addComponent( &mSlotTimeStretchField );
     addComponent( &mSlotsLockedCheckbox );
     
+    addComponent( &mNoFlipCheckbox );
+    addComponent( &mSideAccessCheckbox );
+
     addComponent( &mCreationSoundWidget );
     addComponent( &mUsingSoundWidget );
     addComponent( &mEatingSoundWidget );
@@ -242,6 +262,10 @@ EditorObjectPage::EditorObjectPage()
     addComponent( &mCreationSoundInitialOnlyCheckbox );
     mCreationSoundInitialOnlyCheckbox.setVisible( false );
     mCreationSoundInitialOnlyCheckbox.addActionListener( this );
+
+    addComponent( &mCreationSoundForceCheckbox );
+    mCreationSoundForceCheckbox.setVisible( false );
+    mCreationSoundForceCheckbox.addActionListener( this );
 
 
     mContainSizeField.setVisible( false );
@@ -341,12 +365,16 @@ EditorObjectPage::EditorObjectPage()
     addComponent( &mInvisibleWhenWornCheckbox );
     addComponent( &mInvisibleWhenUnwornCheckbox );
     addComponent( &mBehindSlotsCheckbox );
+    addComponent( &mBehindPlayerCheckbox );
+    addComponent( &mAdditiveBlendCheckbox );
     
     mInvisibleWhenWornCheckbox.setVisible( false );
     mInvisibleWhenUnwornCheckbox.setVisible( false );
 
     mBehindSlotsCheckbox.setVisible( false );
-    
+    mBehindPlayerCheckbox.setVisible( false );
+    mAdditiveBlendCheckbox.setVisible( false );
+
     addComponent( &mAgeInField );
     addComponent( &mAgeOutField );
     
@@ -365,7 +393,8 @@ EditorObjectPage::EditorObjectPage()
     mInvisibleWhenWornCheckbox.addActionListener( this );
     mInvisibleWhenUnwornCheckbox.addActionListener( this );
     mBehindSlotsCheckbox.addActionListener( this );
-    
+    mBehindPlayerCheckbox.addActionListener( this );
+    mAdditiveBlendCheckbox.addActionListener( this );
 
     mAgeInField.addActionListener( this );
     mAgeOutField.addActionListener( this );
@@ -453,6 +482,9 @@ EditorObjectPage::EditorObjectPage()
     mPrintRequested = false;
     mSavePrintOnly = false;
     
+    mSaveFaces = false;
+    
+
     mCurrentObject.id = -1;
     mCurrentObject.description = mDescriptionField.getText();
     mCurrentObject.containable = 0;
@@ -484,6 +516,8 @@ EditorObjectPage::EditorObjectPage()
     mCurrentObject.spriteInvisibleWhenHolding = new char[ 0 ];
     mCurrentObject.spriteInvisibleWhenWorn = new int[ 0 ];
     mCurrentObject.spriteBehindSlots = new char[ 0 ];
+    mCurrentObject.spriteBehindPlayer = new char[ 0 ];
+    mCurrentObject.spriteAdditiveBlend = new char[ 0 ];
 
     mCurrentObject.spriteIsHead = new char[ 0 ];
     mCurrentObject.spriteIsBody = new char[ 0 ];
@@ -652,7 +686,8 @@ EditorObjectPage::EditorObjectPage()
     mInvisibleWhenWornCheckbox.setPosition( 168, 217 );
     mInvisibleWhenUnwornCheckbox.setPosition( 168, 197 );
     mBehindSlotsCheckbox.setPosition( -118, 217 );
-
+    mBehindPlayerCheckbox.setPosition( -118, 197 );
+    mAdditiveBlendCheckbox.setPosition( -118, 300 );
 
     addKeyClassDescription( &mKeyLegend, "n/m", "Switch layers" );
     addKeyClassDescription( &mKeyLegend, "arrows", "Move layer" );
@@ -707,6 +742,8 @@ EditorObjectPage::~EditorObjectPage() {
     delete [] mCurrentObject.spriteInvisibleWhenHolding;
     delete [] mCurrentObject.spriteInvisibleWhenWorn;
     delete [] mCurrentObject.spriteBehindSlots;
+    delete [] mCurrentObject.spriteBehindPlayer;
+    delete [] mCurrentObject.spriteAdditiveBlend;
 
     delete [] mCurrentObject.spriteIsHead;
     delete [] mCurrentObject.spriteIsBody;
@@ -719,6 +756,14 @@ EditorObjectPage::~EditorObjectPage() {
 
     freeSprite( mSlotPlaceholderSprite );
     
+    freeSprite( mFaceFrameSprite );
+    freeSprite( mFaceFrameMaskSprite );
+    freeSprite( mFaceFrameBackgroundSprite );
+    
+    delete mFaceFrameImage;
+    delete mFaceFrameMaskImage;
+
+
     for( int i=0; i<NUM_OBJECT_CHECKBOXES; i++ ) {
         delete mCheckboxes[i];
         }
@@ -1016,6 +1061,19 @@ void EditorObjectPage::updateAgingPanel() {
     else {
         mBehindSlotsCheckbox.setVisible( false );
         }
+    if( mPickedObjectLayer != -1 ) {
+        mBehindPlayerCheckbox.setVisible( true );
+        mBehindPlayerCheckbox.setToggled( 
+            mCurrentObject.spriteBehindPlayer[ mPickedObjectLayer ] );
+        
+        mAdditiveBlendCheckbox.setVisible( true );
+        mAdditiveBlendCheckbox.setToggled( 
+            mCurrentObject.spriteAdditiveBlend[ mPickedObjectLayer ] );
+        }
+    else {
+        mBehindPlayerCheckbox.setVisible( false );
+        mAdditiveBlendCheckbox.setVisible( false );
+        }
     }
 
 
@@ -1129,6 +1187,16 @@ void EditorObjectPage::addNewSprite( int inSpriteID ) {
             mCurrentObject.spriteBehindSlots, 
             mCurrentObject.numSprites * sizeof( char ) );
 
+    char *newSpriteBehindPlayer = new char[ newNumSprites ];
+    memcpy( newSpriteBehindPlayer, 
+            mCurrentObject.spriteBehindPlayer, 
+            mCurrentObject.numSprites * sizeof( char ) );
+
+    char *newSpriteAdditiveBlend = new char[ newNumSprites ];
+    memcpy( newSpriteAdditiveBlend, 
+            mCurrentObject.spriteAdditiveBlend, 
+            mCurrentObject.numSprites * sizeof( char ) );
+
 
     char *newSpriteIsHead = new char[ newNumSprites ];
     memcpy( newSpriteIsHead, 
@@ -1184,6 +1252,8 @@ void EditorObjectPage::addNewSprite( int inSpriteID ) {
     newSpriteInvisibleWhenHolding[ mCurrentObject.numSprites ] = 0;
     newSpriteInvisibleWhenWorn[ mCurrentObject.numSprites ] = 0;
     newSpriteBehindSlots[ mCurrentObject.numSprites ] = false;
+    newSpriteBehindPlayer[ mCurrentObject.numSprites ] = false;
+    newSpriteAdditiveBlend[ mCurrentObject.numSprites ] = false;
             
     newSpriteIsHead[ mCurrentObject.numSprites ] = false;
     newSpriteIsBody[ mCurrentObject.numSprites ] = false;
@@ -1207,6 +1277,8 @@ void EditorObjectPage::addNewSprite( int inSpriteID ) {
     delete [] mCurrentObject.spriteInvisibleWhenHolding;
     delete [] mCurrentObject.spriteInvisibleWhenWorn;
     delete [] mCurrentObject.spriteBehindSlots;
+    delete [] mCurrentObject.spriteBehindPlayer;
+    delete [] mCurrentObject.spriteAdditiveBlend;
 
     delete [] mCurrentObject.spriteIsHead;
     delete [] mCurrentObject.spriteIsBody;
@@ -1233,6 +1305,10 @@ void EditorObjectPage::addNewSprite( int inSpriteID ) {
         newSpriteInvisibleWhenWorn;
     mCurrentObject.spriteBehindSlots = 
         newSpriteBehindSlots;
+    mCurrentObject.spriteBehindPlayer = 
+        newSpriteBehindPlayer;
+    mCurrentObject.spriteAdditiveBlend = 
+        newSpriteAdditiveBlend;
 
 
     mCurrentObject.spriteIsHead = newSpriteIsHead;
@@ -1280,6 +1356,10 @@ void EditorObjectPage::showVertRotButtons() {
 
 
 void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
+    if( mSaveFaces ) {
+        // ignore events
+        return;
+        }
     
     if( inTarget == &mDescriptionField ) {
         
@@ -1322,10 +1402,15 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
             }
         
         char creationSoundInitialOnly = false;
-        
         if( mCreationSoundWidget.getSoundUsage().numSubSounds > 0 ) {
             creationSoundInitialOnly = 
                 mCreationSoundInitialOnlyCheckbox.getToggled();
+            }
+
+        char creationSoundForce = false;        
+        if( mCreationSoundWidget.getSoundUsage().numSubSounds > 0 ) {
+            creationSoundForce = 
+                mCreationSoundForceCheckbox.getToggled();
             }
 
         int newID =
@@ -1334,6 +1419,8 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                    mContainSizeField.getFloat(),
                    mCurrentObject.vertContainRotationOffset,
                    mCheckboxes[1]->getToggled(),
+                   mNoFlipCheckbox.getToggled(),
+                   mSideAccessCheckbox.getToggled(),
                    mMinPickupAgeField.getFloat(),
                    mHeldInHandCheckbox.getToggled(),
                    mRideableCheckbox.getToggled(),
@@ -1341,6 +1428,8 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                    mLeftBlockingRadiusField.getInt(),
                    mRightBlockingRadiusField.getInt(),
                    mDrawBehindPlayerCheckbox.getToggled(),
+                   mCurrentObject.spriteBehindPlayer,
+                   mCurrentObject.spriteAdditiveBlend,
                    biomes,
                    mMapChanceField.getFloat(),
                    mHeatValueField.getInt(),
@@ -1365,6 +1454,7 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                    mEatingSoundWidget.getSoundUsage(),
                    mDecaySoundWidget.getSoundUsage(),
                    creationSoundInitialOnly,
+                   creationSoundForce,
                    mCurrentObject.numSlots,
                    mSlotSizeField.getFloat(),
                    mCurrentObject.slotPos,
@@ -1394,6 +1484,8 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
         
         objectPickable.usePickable( newID );
         
+        mCurrentObject.id = newID;
+        
         delete [] text;
         delete [] biomes;
         
@@ -1401,7 +1493,18 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
         mSpritePicker.unselectObject();
 
         mObjectPicker.redoSearch( false );
-        actionPerformed( &mClearObjectButton );
+
+        if( mCheckboxes[2]->getToggled() ) {
+            // person, save face
+            mSaveFaces = true;
+            mFacesStep = 0;
+            mFacesOrigAge = mPersonAgeSlider.getValue();
+            // clear so that this layer doesn't appear in each face picture
+            mPickedObjectLayer = -1;
+            }
+        else {
+            actionPerformed( &mClearObjectButton );
+            }
         }
     else if( inTarget == &mReplaceObjectButton ) {
         char *text = mDescriptionField.getText();
@@ -1446,11 +1549,16 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
             delete [] raceText;
             }
         
-        char creationSoundInitialOnly = false;
-        
+        char creationSoundInitialOnly = false;        
         if( mCreationSoundWidget.getSoundUsage().numSubSounds > 0 ) {
             creationSoundInitialOnly = 
                 mCreationSoundInitialOnlyCheckbox.getToggled();
+            }
+
+        char creationSoundForce = false;        
+        if( mCreationSoundWidget.getSoundUsage().numSubSounds > 0 ) {
+            creationSoundForce = 
+                mCreationSoundForceCheckbox.getToggled();
             }
 
 
@@ -1459,6 +1567,8 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                    mContainSizeField.getFloat(),
                    mCurrentObject.vertContainRotationOffset,
                    mCheckboxes[1]->getToggled(),
+                   mNoFlipCheckbox.getToggled(),
+                   mSideAccessCheckbox.getToggled(),
                    mMinPickupAgeField.getFloat(),
                    mHeldInHandCheckbox.getToggled(),
                    mRideableCheckbox.getToggled(),
@@ -1466,6 +1576,8 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                    mLeftBlockingRadiusField.getInt(),
                    mRightBlockingRadiusField.getInt(),
                    mDrawBehindPlayerCheckbox.getToggled(),
+                   mCurrentObject.spriteBehindPlayer,
+                   mCurrentObject.spriteAdditiveBlend,
                    biomes,
                    mMapChanceField.getFloat(),
                    mHeatValueField.getInt(),
@@ -1490,6 +1602,7 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                    mEatingSoundWidget.getSoundUsage(),
                    mDecaySoundWidget.getSoundUsage(),
                    creationSoundInitialOnly,
+                   creationSoundForce,
                    mCurrentObject.numSlots,
                    mSlotSizeField.getFloat(), 
                    mCurrentObject.slotPos,
@@ -1538,7 +1651,17 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
             }    
 
 
-        actionPerformed( &mClearObjectButton );
+        if( mCheckboxes[2]->getToggled() ) {
+            // person, save face
+            mSaveFaces = true;
+            mFacesStep = 0;
+            mFacesOrigAge = mPersonAgeSlider.getValue();
+            // clear so that this layer doesn't appear in each face picture
+            mPickedObjectLayer = -1;
+            }
+        else {
+            actionPerformed( &mClearObjectButton );
+            }
         }
     else if( inTarget == &mClearObjectButton ) {
         mCurrentObject.id = -1;
@@ -1600,7 +1723,10 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
 
         mBehindSlotsCheckbox.setToggled( false );
         mBehindSlotsCheckbox.setVisible( false );
-        
+
+        mBehindPlayerCheckbox.setToggled( false );
+        mBehindPlayerCheckbox.setVisible( false );
+        mAdditiveBlendCheckbox.setVisible( false );
 
         delete [] mCurrentObject.slotPos;
         mCurrentObject.slotPos = new doublePair[ 0 ];
@@ -1771,7 +1897,9 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                                 mCurrentObject.numSprites,
                                 mCurrentObject.sprites,
                                 mCurrentObject.spritePos,
-                                mCurrentObject.spriteHFlip );
+                                mCurrentObject.spriteRot,
+                                mCurrentObject.spriteHFlip,
+                                mCurrentObject.spriteColor );
         
         spritePickable.usePickable( newID );
 
@@ -1879,6 +2007,8 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                 mSlotsLockedCheckbox.setVisible( false );
 
                 mBehindSlotsCheckbox.setVisible( false );
+                mBehindPlayerCheckbox.setVisible( false );
+                mAdditiveBlendCheckbox.setVisible( false );
                 }
             }
         }
@@ -2187,6 +2317,14 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
         mCurrentObject.spriteBehindSlots[ mPickedObjectLayer ]
             = mBehindSlotsCheckbox.getToggled();
         }
+    else if( inTarget == &mBehindPlayerCheckbox ) {
+        mCurrentObject.spriteBehindPlayer[ mPickedObjectLayer ]
+            = mBehindPlayerCheckbox.getToggled();
+        }
+    else if( inTarget == &mAdditiveBlendCheckbox ) {
+        mCurrentObject.spriteAdditiveBlend[ mPickedObjectLayer ]
+            = mAdditiveBlendCheckbox.getToggled();
+        }
     else if( inTarget == &mHeadLayerCheckbox ) {
         mCurrentObject.spriteIsHead[ mPickedObjectLayer ] =
             mHeadLayerCheckbox.getToggled();
@@ -2399,9 +2537,7 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
         
         mSimUseSlider.setVisible( false );
         mSimUseCheckbox.setToggled( false );
-        mSimUseCheckbox.setVisible( false );
         
-        mUseChanceField.setVisible( false );
         
         
         char rightClick;
@@ -2455,12 +2591,31 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                 
                 mCurrentObject.spriteBehindSlots[i + oldNumSprites] = 
                     pickedRecord->spriteBehindSlots[i];
+
+                mCurrentObject.spriteBehindPlayer[i + oldNumSprites] = false;
+                if( pickedRecord->spriteBehindPlayer != NULL ) {
+                    mCurrentObject.spriteBehindPlayer[i + oldNumSprites] = 
+                        pickedRecord->spriteBehindPlayer[i];
+                    }
+                
+                mCurrentObject.spriteAdditiveBlend[i + oldNumSprites] = false;
+                if( pickedRecord->spriteAdditiveBlend != NULL ) {
+                    mCurrentObject.spriteAdditiveBlend[i + oldNumSprites] = 
+                        pickedRecord->spriteAdditiveBlend[i];
+                    }
+
                 
                 if( pickedRecord->spriteParent[i] != -1 ) {
                     mCurrentObject.spriteParent[i + oldNumSprites] = 
                         pickedRecord->spriteParent[i] + oldNumSprites;
                     }
                 }
+
+            // make bottom layer of inserted object the active layer
+            mPickedObjectLayer = oldNumSprites;
+            mPickedSlot = -1;
+            
+            pickedLayerChanged();
             }
         else if( objectID != -1 ) {
             ObjectRecord *pickedRecord = getObject( objectID );
@@ -2479,6 +2634,8 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
             delete [] mCurrentObject.spriteInvisibleWhenHolding;
             delete [] mCurrentObject.spriteInvisibleWhenWorn;
             delete [] mCurrentObject.spriteBehindSlots;
+            delete [] mCurrentObject.spriteBehindPlayer;
+            delete [] mCurrentObject.spriteAdditiveBlend;
 
             delete [] mCurrentObject.spriteIsHead;
             delete [] mCurrentObject.spriteIsBody;
@@ -2582,6 +2739,12 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
             mCurrentObject.spriteBehindSlots = 
                 new char[ pickedRecord->numSprites ];
 
+            mCurrentObject.spriteBehindPlayer = 
+                new char[ pickedRecord->numSprites ];
+
+            mCurrentObject.spriteAdditiveBlend = 
+                new char[ pickedRecord->numSprites ];
+
 
             mCurrentObject.spriteIsHead = 
                 new char[ pickedRecord->numSprites ];
@@ -2646,6 +2809,24 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
             memcpy( mCurrentObject.spriteBehindSlots, 
                     pickedRecord->spriteBehindSlots,
                     sizeof( char ) * pickedRecord->numSprites );
+
+            memset( mCurrentObject.spriteBehindPlayer, false, 
+                    pickedRecord->numSprites );
+            
+            if( pickedRecord->spriteBehindPlayer != NULL ) {    
+                memcpy( mCurrentObject.spriteBehindPlayer, 
+                        pickedRecord->spriteBehindPlayer,
+                        sizeof( char ) * pickedRecord->numSprites );
+                }
+
+            memset( mCurrentObject.spriteAdditiveBlend, false, 
+                    pickedRecord->numSprites );
+            
+            if( pickedRecord->spriteAdditiveBlend != NULL ) {    
+                memcpy( mCurrentObject.spriteAdditiveBlend, 
+                        pickedRecord->spriteAdditiveBlend,
+                        sizeof( char ) * pickedRecord->numSprites );
+                }
             
             memcpy( mCurrentObject.spriteIsHead, 
                     pickedRecord->spriteIsHead,
@@ -2724,10 +2905,19 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
 
             mBehindSlotsCheckbox.setToggled( false );
             mBehindSlotsCheckbox.setVisible( false );
+
+            mBehindPlayerCheckbox.setToggled( false );
+            mBehindPlayerCheckbox.setVisible( false );
+            
+            mAdditiveBlendCheckbox.setToggled( false );
+            mAdditiveBlendCheckbox.setVisible( false );
             
             mCheckboxes[0]->setToggled( pickedRecord->containable );
             mCheckboxes[1]->setToggled( pickedRecord->permanent );
             mCheckboxes[2]->setToggled( pickedRecord->person );
+            
+            mNoFlipCheckbox.setToggled( pickedRecord->noFlip );
+            mSideAccessCheckbox.setToggled( pickedRecord->sideAccess );
 
             if( mCheckboxes[0]->getToggled() ) {
                 showVertRotButtons();
@@ -2752,6 +2942,12 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                 pickedRecord->creationSoundInitialOnly );
 
             mCreationSoundInitialOnlyCheckbox.setVisible( 
+                mCreationSoundWidget.getSoundUsage().numSubSounds > 0 );
+            
+            mCreationSoundForceCheckbox.setToggled( 
+                pickedRecord->creationSoundForce );
+
+            mCreationSoundForceCheckbox.setVisible( 
                 mCreationSoundWidget.getSoundUsage().numSubSounds > 0 );
             
 
@@ -3081,7 +3277,8 @@ void EditorObjectPage::drawSpriteLayers( doublePair inDrawOffset,
 
         char multiplicative = 
             getUsesMultiplicativeBlending( mCurrentObject.sprites[i] );
-
+        char additive = mCurrentObject.spriteAdditiveBlend[i];
+        
         
         if( mHoverObjectLayer == i && mHoverStrength > 0 ) {
             blue = 1 - mHoverStrength;
@@ -3166,6 +3363,9 @@ void EditorObjectPage::drawSpriteLayers( doublePair inDrawOffset,
                 toggleAdditiveTextureColoring( true );
                 }
             }
+        if( additive ) {
+            toggleAdditiveBlend( true );
+            }
         
         if( ( inBehindSlots && mCurrentObject.spriteBehindSlots[i] )
             ||
@@ -3211,6 +3411,9 @@ void EditorObjectPage::drawSpriteLayers( doublePair inDrawOffset,
             if( mHoverObjectLayer == i && mHoverStrength > 0 ) {
                 toggleAdditiveTextureColoring( false );
                 }
+            }
+        if( additive ) {
+            toggleAdditiveBlend( false );
             }
         }    
     }
@@ -3268,11 +3471,11 @@ void EditorObjectPage::draw( doublePair inViewCenter,
 
     // draw overlay to show foot-cross-over point
 
-    doublePair footRecPos = { 0, -96 };
+    doublePair footRecPos = { 0, -80 };
     
     setDrawColor( 0, 0, 0, 0.1 );
     
-    drawRect( footRecPos, 192, 32 );
+    drawRect( footRecPos, 192, 16 );
     
 
     
@@ -3288,10 +3491,67 @@ void EditorObjectPage::draw( doublePair inViewCenter,
     drawRect( barPos, 192, 16 );
 
 
+    doublePair framePos = { 0, 0 };
+    char allLoaded = false;
+
+    // always keep whole current object loaded
+    allLoaded = true;
+    for( int i=0; i<mCurrentObject.numSprites; i++ ) {
+        allLoaded = 
+            allLoaded && markSpriteLive( mCurrentObject.sprites[i] );
+        }
+
+
+
     if( mPrintRequested ) {
         doublePair pos = { 0, 0 };
                            
         drawSquare( pos, 600 );
+        }
+    else if( mSaveFaces ) {
+        
+        if( allLoaded ) {
+
+            mPersonAgeSlider.setValue( faceStepAges[ mFacesStep ] );
+
+            double age = mPersonAgeSlider.getValue();
+            
+            int headIndex = getHeadIndex( &mCurrentObject, age );
+            
+            doublePair headPos = mCurrentObject.spritePos[ headIndex ];
+            
+            
+            int frontFootIndex = getFrontFootIndex( &mCurrentObject, age );
+            
+            doublePair frontFootPos = 
+                mCurrentObject.spritePos[ frontFootIndex ];
+            
+
+            int bodyIndex = getBodyIndex( &mCurrentObject, age );
+            
+            doublePair bodyPos = mCurrentObject.spritePos[ bodyIndex ];
+            
+            
+            if( headIndex != -1 ) {
+                framePos = add( add( mCurrentObject.spritePos[ headIndex ],
+                                     getAgeHeadOffset( age, headPos,
+                                                       bodyPos,
+                                                       frontFootPos ) ),
+                                getAgeBodyOffset( age, bodyPos ) );
+                framePos.y -= 15;
+                }
+            
+            setDrawColor( 0, 0, 0, 1 );
+            
+            drawRect( framePos, 110, 110 );
+            
+            setDrawColor( 1, 1, 1, 1 );
+            drawSprite( mFaceFrameBackgroundSprite, framePos );
+            
+            startAddingToStencil( false, true );
+            drawSprite( mFaceFrameMaskSprite, framePos );
+            startDrawingThroughStencil();
+            }
         }
     
 
@@ -3527,7 +3787,91 @@ void EditorObjectPage::draw( doublePair inViewCenter,
         
         mPrintRequested = false;
         }
-            
+
+    if( mSaveFaces && allLoaded ) {
+        stopStencil();
+        
+        setDrawColor( 1, 1, 1, 1 );
+        drawSprite( mFaceFrameSprite, framePos );
+
+        int w = 100;
+        int h = 98;
+        
+        Image *im = getScreenRegion( framePos.x - 51, framePos.y - 49,
+                                   w, h );
+        
+        
+        Image *transImage = im->generateAlphaChannel();
+
+        delete im;
+        
+        double *a = transImage->getChannel( 3 );
+        
+        int numPixels = w * h;
+        for( int i=0; i<numPixels; i++ ) {
+            a[i] = 0;
+            }
+        
+        int fW = mFaceFrameImage->getWidth();
+        int fH = mFaceFrameImage->getHeight();
+        
+        double *fA = mFaceFrameImage->getChannel( 3 );
+
+
+        int fmW = mFaceFrameMaskImage->getWidth();
+        int fmH = mFaceFrameMaskImage->getHeight();
+        
+        double *fmA = mFaceFrameMaskImage->getChannel( 3 );
+
+        for( int y=0; y<h; y++ ) {
+            int cY = y - 49;
+            int fY = cY + fH/2;
+            int fmY = cY + fmH/2;
+
+            for( int x=0; x<w; x++ ) {
+                int i = y * w + x;
+
+                int cX = x - 51;
+
+                int fX = cX + fW/2;                
+                int fI = fY * fW + fX;
+
+                int fmX = cX + fmW/2;
+                int fmI = fmY * fmW + fmX;
+
+                a[i] = fA[ fI ];
+                if( fmA[ fmI ] > a[i] ) {
+                    a[i] = fmA[ fmI ];
+                    }
+                }
+            }
+        
+        
+        
+        char *name = autoSprintf( "faces/face_%d_%d.png",
+                                  mCurrentObject.id,
+                                  lrint( mPersonAgeSlider.getValue() ) );
+        
+        PNGImageConverter pngConv;
+        
+        File outFile( NULL, name );
+        FileOutputStream outStream( &outFile );
+        
+        pngConv.formatImage( transImage, &outStream );
+
+        delete [] name;
+        delete transImage;
+        
+
+        mFacesStep++;
+        
+        if( mFacesStep >= NUM_FACES_STEPS ) {
+            mSaveFaces = false;
+            mPersonAgeSlider.setValue( mFacesOrigAge );
+            actionPerformed( &mClearObjectButton );
+            }
+        }
+    
     
 
 
@@ -3610,12 +3954,39 @@ void EditorObjectPage::draw( doublePair inViewCenter,
         
         smallFont->drawString( "Behind Slots", pos, alignRight );
         }
+
+    if( mBehindPlayerCheckbox.isVisible() ) {
+        pos = mBehindPlayerCheckbox.getPosition();
+    
+        pos.x -= checkboxSep;
+        
+        smallFont->drawString( "Behind Player", pos, alignRight );
+        }
+
+    if( mAdditiveBlendCheckbox.isVisible() ) {
+        pos = mAdditiveBlendCheckbox.getPosition();
+    
+        pos.x -= checkboxSep;
+        
+        smallFont->drawString( "Additive Blend", pos, alignRight );
+        }
     
 
     if( mSlotsLockedCheckbox.isVisible() ) {
         pos = mSlotsLockedCheckbox.getPosition();
         pos.x -= checkboxSep;
         smallFont->drawString( "Locked", pos, alignRight );
+        }
+
+    if( mNoFlipCheckbox.isVisible() ) {
+        pos = mNoFlipCheckbox.getPosition();
+        pos.x -= checkboxSep;
+        smallFont->drawString( "No Flip", pos, alignRight );
+        }
+    if( mSideAccessCheckbox.isVisible() ) {
+        pos = mSideAccessCheckbox.getPosition();
+        pos.x -= checkboxSep;
+        smallFont->drawString( "Side Access", pos, alignRight );
         }
 
     
@@ -3778,6 +4149,12 @@ void EditorObjectPage::draw( doublePair inViewCenter,
         smallFont->drawString( "Initial Only", pos, alignRight );
         }
 
+    if( mCreationSoundForceCheckbox.isVisible() ) {
+        pos = mCreationSoundForceCheckbox.getPosition();
+        pos.x -= checkboxSep;
+        smallFont->drawString( "Force", pos, alignRight );
+        }
+
     
     if( mPickedObjectLayer != -1 ) {
         char *tag = getSpriteRecord( 
@@ -3792,6 +4169,24 @@ void EditorObjectPage::draw( doublePair inViewCenter,
                                        spritePos.x, spritePos.y );
         
         smallFont->drawString( tag, pos, alignRight );
+        
+        smallFont->drawString( posString, pos, alignLeft );
+        
+        delete [] posString;
+        }
+    else if( mPickedSlot != -1 ) {
+        char *tag = autoSprintf( "Slot %d", mPickedSlot + 1 );
+        pos.x = 0;
+        pos.y = -106;
+
+        doublePair slotPos = mCurrentObject.slotPos[ mPickedSlot ];
+        
+        char *posString = autoSprintf( "  ( %.0f, %.0f )",
+                                       slotPos.x, slotPos.y );
+        
+        smallFont->drawString( tag, pos, alignRight );
+        
+        delete [] tag;
         
         smallFont->drawString( posString, pos, alignLeft );
         
@@ -3966,10 +4361,12 @@ void EditorObjectPage::step() {
         ( mCreationSoundWidget.getSoundUsage().numSubSounds > 0 );
     
     mCreationSoundInitialOnlyCheckbox.setVisible( creationSoundPresent );
+    mCreationSoundForceCheckbox.setVisible( creationSoundPresent );
     
     if( ! creationSoundPresent ) {
         // un-toggle whenever sound cleared
         mCreationSoundInitialOnlyCheckbox.setToggled( false );
+        mCreationSoundForceCheckbox.setToggled( false );
         }
     
 
@@ -4014,10 +4411,13 @@ void EditorObjectPage::step() {
         mFlipHButton.setVisible( false );
         }
 
-    if( mPersonAgeSlider.isVisible() || 
+    // pretty sure using sound should be visible for all objects now
+    if( true ||
+        mPersonAgeSlider.isVisible() || 
         mSlotSizeField.isVisible() ||
         anyClothingToggled() ||
         mCheckboxes[1]->getToggled() ||
+        mNumUsesField.getInt() > 1 || 
         mFloorCheckbox.getToggled() ) {
         
         mUsingSoundWidget.setVisible( true );
@@ -4093,6 +4493,8 @@ void EditorObjectPage::clearUseOfSprite( int inSpriteID ) {
     char *newSpriteInvisibleWhenHolding = new char[ newNumSprites ];
     int *newSpriteInvisibleWhenWorn = new int[ newNumSprites ];
     char *newSpriteBehindSlots = new char[ newNumSprites ];
+    char *newSpriteBehindPlayer = new char[ newNumSprites ];
+    char *newSpriteAdditiveBlend = new char[ newNumSprites ];
 
     char *newSpriteIsHead = new char[ newNumSprites ];
     char *newSpriteIsBody = new char[ newNumSprites ];
@@ -4121,6 +4523,10 @@ void EditorObjectPage::clearUseOfSprite( int inSpriteID ) {
                 mCurrentObject.spriteInvisibleWhenWorn[i];
             newSpriteBehindSlots[j] = 
                 mCurrentObject.spriteBehindSlots[i];
+            newSpriteBehindPlayer[j] = 
+                mCurrentObject.spriteBehindPlayer[i];
+            newSpriteAdditiveBlend[j] = 
+                mCurrentObject.spriteAdditiveBlend[i];
             newSpriteIsHead[j] = mCurrentObject.spriteIsHead[i];
             newSpriteIsBody[j] = mCurrentObject.spriteIsBody[i];
             newSpriteIsBackFoot[j] = mCurrentObject.spriteIsBackFoot[i];
@@ -4143,6 +4549,8 @@ void EditorObjectPage::clearUseOfSprite( int inSpriteID ) {
     delete [] mCurrentObject.spriteInvisibleWhenHolding;
     delete [] mCurrentObject.spriteInvisibleWhenWorn;
     delete [] mCurrentObject.spriteBehindSlots;
+    delete [] mCurrentObject.spriteBehindPlayer;
+    delete [] mCurrentObject.spriteAdditiveBlend;
 
     delete [] mCurrentObject.spriteIsHead;
     delete [] mCurrentObject.spriteIsBody;
@@ -4163,6 +4571,8 @@ void EditorObjectPage::clearUseOfSprite( int inSpriteID ) {
     mCurrentObject.spriteInvisibleWhenHolding = newSpriteInvisibleWhenHolding;
     mCurrentObject.spriteInvisibleWhenWorn = newSpriteInvisibleWhenWorn;
     mCurrentObject.spriteBehindSlots = newSpriteBehindSlots;
+    mCurrentObject.spriteBehindPlayer = newSpriteBehindPlayer;
+    mCurrentObject.spriteAdditiveBlend = newSpriteAdditiveBlend;
 
     mCurrentObject.spriteIsHead = newSpriteIsHead;
     mCurrentObject.spriteIsBody = newSpriteIsBody;
@@ -4292,19 +4702,7 @@ void EditorObjectPage::pickedLayerChanged() {
         mBakeButton.setVisible( false );
 
         if( strcmp( des, "" ) != 0 ) {
-            char allLayersOpaque = true;
-            
-            for( int i=0; i<mCurrentObject.numSprites; i++ ) {
-                if( getUsesMultiplicativeBlending( 
-                        mCurrentObject.sprites[i] ) ) {
-                    
-                    allLayersOpaque = false;
-                    break;
-                    }
-                }
-            if( allLayersOpaque ) {
-                mBakeButton.setVisible( true );
-                }
+            mBakeButton.setVisible( true );
             }
         delete [] des;
         }
@@ -4370,6 +4768,11 @@ void EditorObjectPage::pickedLayerChanged() {
 
 
 void EditorObjectPage::pointerMove( float inX, float inY ) {
+    if( mSaveFaces ) {
+        // ignore events
+        return;
+        }
+    
     lastMouseX = inX;
     lastMouseY = inY;
 
@@ -4408,6 +4811,11 @@ void EditorObjectPage::pointerMove( float inX, float inY ) {
 
 
 void EditorObjectPage::pointerDown( float inX, float inY ) {
+    if( mSaveFaces ) {
+        // ignore events
+        return;
+        }
+    
     mHoverStrength = 0;
     
     if( inX < -192 || inX > 192 || 
@@ -4546,7 +4954,11 @@ void EditorObjectPage::recursiveMove( ObjectRecord *inObject,
 
 
 void EditorObjectPage::pointerDrag( float inX, float inY ) {
-
+    if( mSaveFaces ) {
+        // ignore events
+        return;
+        }
+    
     lastMouseX = inX;
     lastMouseY = inY;
 
@@ -4664,6 +5076,10 @@ static int *deleteFromIntArray( int *inArray, int inOldLength,
 
 
 void EditorObjectPage::keyDown( unsigned char inASCII ) {
+    if( mSaveFaces ) {
+        // ignore events
+        return;
+        }
     
     if( TextField::isAnyFocused() || mSetHeldPos ) {
         return;
@@ -4762,6 +5178,12 @@ void EditorObjectPage::keyDown( unsigned char inASCII ) {
 
         mCurrentObject.spriteBehindSlots[mPickedObjectLayer] =
             mCurrentObject.spriteBehindSlots[layerToDupe];
+
+        mCurrentObject.spriteBehindPlayer[mPickedObjectLayer] =
+            mCurrentObject.spriteBehindPlayer[layerToDupe];
+
+        mCurrentObject.spriteAdditiveBlend[mPickedObjectLayer] =
+            mCurrentObject.spriteAdditiveBlend[layerToDupe];
 
         mCurrentObject.spriteUseVanish[mPickedObjectLayer] =
             mCurrentObject.spriteUseVanish[layerToDupe];
@@ -4883,6 +5305,16 @@ void EditorObjectPage::keyDown( unsigned char inASCII ) {
             deleteFromCharArray( mCurrentObject.spriteBehindSlots, 
                                  mCurrentObject.numSprites,
                                  mPickedObjectLayer );
+
+        char *newSpriteBehindPlayer = 
+            deleteFromCharArray( mCurrentObject.spriteBehindPlayer, 
+                                 mCurrentObject.numSprites,
+                                 mPickedObjectLayer );
+
+        char *newSpriteAdditiveBlend = 
+            deleteFromCharArray( mCurrentObject.spriteAdditiveBlend, 
+                                 mCurrentObject.numSprites,
+                                 mPickedObjectLayer );
         
         char *newSpriteIsHead = 
             deleteFromCharArray( mCurrentObject.spriteIsHead, 
@@ -4926,6 +5358,8 @@ void EditorObjectPage::keyDown( unsigned char inASCII ) {
         delete [] mCurrentObject.spriteInvisibleWhenHolding;
         delete [] mCurrentObject.spriteInvisibleWhenWorn;
         delete [] mCurrentObject.spriteBehindSlots;
+        delete [] mCurrentObject.spriteBehindPlayer;
+        delete [] mCurrentObject.spriteAdditiveBlend;
         delete [] mCurrentObject.spriteIsHead;
         delete [] mCurrentObject.spriteIsBody;
         delete [] mCurrentObject.spriteIsBackFoot;
@@ -4948,6 +5382,10 @@ void EditorObjectPage::keyDown( unsigned char inASCII ) {
             newSpriteInvisibleWhenWorn;
         mCurrentObject.spriteBehindSlots = 
             newSpriteBehindSlots;
+        mCurrentObject.spriteBehindPlayer = 
+            newSpriteBehindPlayer;
+        mCurrentObject.spriteAdditiveBlend = 
+            newSpriteAdditiveBlend;
         
         mCurrentObject.spriteIsHead = newSpriteIsHead;
         mCurrentObject.spriteIsBody = newSpriteIsBody;
@@ -5086,6 +5524,10 @@ void EditorObjectPage::keyUp( unsigned char inASCII ) {
 
 
 void EditorObjectPage::specialKeyDown( int inKeyCode ) {
+    if( mSaveFaces ) {
+        // ignore events
+        return;
+        }
     
     if( mDescriptionField.isAnyFocused() ) {
         return;
@@ -5287,6 +5729,14 @@ void EditorObjectPage::specialKeyDown( int inKeyCode ) {
                             mCurrentObject.spriteBehindSlots[
                                 mPickedObjectLayer + 
                                 layerOffset];
+                        char tempBehindPlayer = 
+                            mCurrentObject.spriteBehindPlayer[
+                                mPickedObjectLayer + 
+                                layerOffset];
+                        char tempAdditiveBlend = 
+                            mCurrentObject.spriteAdditiveBlend[
+                                mPickedObjectLayer + 
+                                layerOffset];
 
                         char tempIsHead = 
                             mCurrentObject.spriteIsHead[
@@ -5394,6 +5844,23 @@ void EditorObjectPage::specialKeyDown( int inKeyCode ) {
                                 mPickedObjectLayer];
                         mCurrentObject.spriteBehindSlots[
                             mPickedObjectLayer] = tempBehindSlots;
+
+                        mCurrentObject.spriteBehindPlayer[
+                            mPickedObjectLayer 
+                            + layerOffset]
+                            = mCurrentObject.spriteBehindPlayer[
+                                mPickedObjectLayer];
+                        mCurrentObject.spriteBehindPlayer[
+                            mPickedObjectLayer] = tempBehindPlayer;
+
+
+                        mCurrentObject.spriteAdditiveBlend[
+                            mPickedObjectLayer 
+                            + layerOffset]
+                            = mCurrentObject.spriteAdditiveBlend[
+                                mPickedObjectLayer];
+                        mCurrentObject.spriteAdditiveBlend[
+                            mPickedObjectLayer] = tempAdditiveBlend;
 
 
                         mCurrentObject.spriteIsHead[ mPickedObjectLayer 
@@ -5526,6 +5993,14 @@ void EditorObjectPage::specialKeyDown( int inKeyCode ) {
                             mCurrentObject.spriteBehindSlots[
                                 mPickedObjectLayer - 
                                 layerOffset];
+                        char tempBehindPlayer = 
+                            mCurrentObject.spriteBehindPlayer[
+                                mPickedObjectLayer - 
+                                layerOffset];
+                        char tempAdditiveBlend = 
+                            mCurrentObject.spriteAdditiveBlend[
+                                mPickedObjectLayer - 
+                                layerOffset];
 
 
                         char tempIsHead = 
@@ -5634,6 +6109,22 @@ void EditorObjectPage::specialKeyDown( int inKeyCode ) {
                                 mPickedObjectLayer];
                         mCurrentObject.spriteBehindSlots[
                             mPickedObjectLayer] = tempBehindSlots;
+
+                        mCurrentObject.spriteBehindPlayer[
+                            mPickedObjectLayer 
+                            - layerOffset]
+                            = mCurrentObject.spriteBehindPlayer[
+                                mPickedObjectLayer];
+                        mCurrentObject.spriteBehindPlayer[
+                            mPickedObjectLayer] = tempBehindPlayer;
+
+                        mCurrentObject.spriteAdditiveBlend[
+                            mPickedObjectLayer 
+                            - layerOffset]
+                            = mCurrentObject.spriteAdditiveBlend[
+                                mPickedObjectLayer];
+                        mCurrentObject.spriteAdditiveBlend[
+                            mPickedObjectLayer] = tempAdditiveBlend;
 
 
 

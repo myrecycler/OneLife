@@ -24,7 +24,7 @@ Paper masking process:
 10.  Make solid black layer and mask it with same mask.
 
 11.  Blur black with radius 13, set layer opacity to 86% for shadow.
-
+     (Smaller slips use blur radius 7 with opacity 66% for shadow).
 
 
 Font process:
@@ -40,3 +40,15 @@ Font process:
 5.  Merge 4 onto result of 2.
 
 6.  Invert.
+
+
+
+
+Sepia for Steam capsules:
+
+1.  Desaturate with luminostiy.
+
+
+2.  Colorize with these settings:
+  Hue, sat, lightness:
+  39,  38,  16

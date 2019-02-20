@@ -19,7 +19,9 @@
 #include "minorGems/formats/encodingUtils.h"
 
 #include "kissdb.h"
-#include "stackdb.h"
+//#include "stackdb.h"
+//#include "lineardb.h"
+#include "lineardb3.h"
 
 
 /*
@@ -33,9 +35,16 @@
 #define DB_Iterator  KISSDB_Iterator
 #define DB_Iterator_init  KISSDB_Iterator_init
 #define DB_Iterator_next  KISSDB_Iterator_next
+#define DB_maxStack (int)( db.num_hash_tables )
+// no support for shrinking
+#define DB_getShrinkSize( dbP, n )  dbP->hashTableSize
+#define DB_getCurrentSize( dbP )  dbP->hashTableSize
+// no support for counting records
+#define DB_getNumRecords( dbP ) 0
 */
 
-/**/
+
+/*
 #define DB STACKDB
 #define DB_open STACKDB_open
 #define DB_close STACKDB_close
@@ -46,12 +55,55 @@
 #define DB_Iterator  STACKDB_Iterator
 #define DB_Iterator_init  STACKDB_Iterator_init
 #define DB_Iterator_next  STACKDB_Iterator_next
-/**/
+#define DB_maxStack db.maxStackDepth
+// no support for shrinking
+#define DB_getShrinkSize( dbP, n )  dbP->hashTableSize
+#define DB_getCurrentSize( dbP )  dbP->hashTableSize
+// no support for counting records
+#define DB_getNumRecords( dbP ) 0
+*/
+
+/*
+#define DB LINEARDB
+#define DB_open LINEARDB_open
+#define DB_close LINEARDB_close
+#define DB_get LINEARDB_get
+#define DB_put LINEARDB_put
+// no distinction between put and put_new in lineardb
+#define DB_put_new LINEARDB_put
+#define DB_Iterator  LINEARDB_Iterator
+#define DB_Iterator_init  LINEARDB_Iterator_init
+#define DB_Iterator_next  LINEARDB_Iterator_next
+#define DB_maxStack db.maxProbeDepth
+#define DB_getShrinkSize  LINEARDB_getShrinkSize
+#define DB_getCurrentSize  LINEARDB_getCurrentSize
+#define DB_getNumRecords LINEARDB_getNumRecords
+*/
+
+
+#define DB LINEARDB3
+#define DB_open LINEARDB3_open
+#define DB_close LINEARDB3_close
+#define DB_get LINEARDB3_get
+#define DB_put LINEARDB3_put
+// no distinction between put and put_new in lineardb3
+#define DB_put_new LINEARDB3_put
+#define DB_Iterator  LINEARDB3_Iterator
+#define DB_Iterator_init  LINEARDB3_Iterator_init
+#define DB_Iterator_next  LINEARDB3_Iterator_next
+#define DB_maxStack db.maxOverflowDepth
+#define DB_getShrinkSize  LINEARDB3_getShrinkSize
+#define DB_getCurrentSize  LINEARDB3_getCurrentSize
+#define DB_getNumRecords LINEARDB3_getNumRecords
 
 
 
 
 
+    
+
+
+    
 #include "dbCommon.h"
 
 
@@ -66,6 +118,7 @@
 #include "../gameSource/GridPos.h"
 
 #include "../gameSource/GridPos.h"
+#include "../gameSource/objectMetadata.h"
 
 
 
@@ -89,11 +142,21 @@ timeSec_t fastTime() {
     }
 
 
+
+timeSec_t slowTime() {
+    if( startFastTime == -1 ) {
+        startFastTime = Time::timeSec();
+        }
+    return ( Time::timeSec() - startFastTime ) / 4 + startFastTime;
+    }
+
+
 // can replace with frozenTime to freeze time
 // or slowTime to slow it down
 #define MAP_TIMESEC Time::timeSec()
 //#define MAP_TIMESEC frozenTime()
 //#define MAP_TIMESEC fastTime()
+//#define MAP_TIMESEC slowTime()
 
 
 extern GridPos getClosestPlayerPos( int inX, int inY );
@@ -220,6 +283,8 @@ static DB eveDB;
 static char eveDBOpen = false;
 
 
+static DB metaDB;
+static char metaDBOpen = false;
 
 
 
@@ -259,6 +324,14 @@ typedef struct LiveDecayRecord {
         // >0 indexs sub containers of object
         int subCont;
 
+        // the transition that will apply when this decay happens
+        // this allows us to avoid marking certain types of move decays
+        // as stale when not looked at in a while (all other types of decays
+        // go stale)
+        // Can be NULL if we don't care about the transition
+        // associated with this decay (for contained item decay, for example)
+        TransRecord *applicableTrans;
+
     } LiveDecayRecord;
 
 
@@ -277,6 +350,22 @@ static HashTable<timeSec_t> liveDecayRecordPresentHashTable( 1024 );
 // times in seconds that a tracked live decay map cell or slot
 // was last looked at
 static HashTable<timeSec_t> liveDecayRecordLastLookTimeHashTable( 1024 );
+
+
+typedef struct ContRecord {
+    int maxSlots;
+    int maxSubSlots;
+    } ContRecord;
+
+static ContRecord defaultContRecord = { 0, 0 };
+
+
+// track max tracked contained for each x,y
+// this allows us to update last look times without getting contained count
+// from map
+// indexed as x, y, 0, 0
+static HashTable<ContRecord> 
+liveDecayRecordLastLookTimeMaxContainedHashTable( 1024, defaultContRecord );
 
 
 
@@ -304,6 +393,10 @@ static SimpleVector<ChangePosition> mapChangePosSinceLastStep;
 
 
 static char anyBiomesInDB = false;
+static int maxBiomeXLoc = -2000000000;
+static int maxBiomeYLoc = -2000000000;
+static int minBiomeXLoc = 2000000000;
+static int minBiomeYLoc = 2000000000;
 
 
 
@@ -454,16 +547,30 @@ static void biomeDBPut( int inX, int inY, int inValue, int inSecondPlace,
             
     
     anyBiomesInDB = true;
-    DB_put( &biomeDB, key, value );
 
-    dbLookTimePut( inX, inY, MAP_TIMESEC );
+    if( inX > maxBiomeXLoc ) {
+        maxBiomeXLoc = inX;
+        }
+    if( inX < minBiomeXLoc ) {
+        minBiomeXLoc = inX;
+        }
+    if( inY > maxBiomeYLoc ) {
+        maxBiomeYLoc = inY;
+        }
+    if( inY < minBiomeYLoc ) {
+        minBiomeYLoc = inY;
+        }
+    
+
+    DB_put( &biomeDB, key, value );
     }
     
 
 
 
 // returns -1 on failure, 1 on success
-static int eveDBGet( char *inEmail, int *outX, int *outY, int *outRadius ) {
+static int eveDBGet( const char *inEmail, int *outX, int *outY, 
+                     int *outRadius ) {
     unsigned char key[50];
     
     unsigned char value[12];
@@ -488,7 +595,7 @@ static int eveDBGet( char *inEmail, int *outX, int *outY, int *outRadius ) {
 
 
 
-static void eveDBPut( char *inEmail, int inX, int inY, int inRadius ) {
+static void eveDBPut( const char *inEmail, int inX, int inY, int inRadius ) {
     unsigned char key[50];
     unsigned char value[12];
     
@@ -564,7 +671,7 @@ static BiomeCacheRecord biomeCache[ BIOME_CACHE_SIZE ];
 #define CACHE_PRIME_C 528383237
 #define CACHE_PRIME_D 148497157
 
-static int computeBiomeCacheHash( int inKeyA, int inKeyB ) {
+static int computeXYCacheHash( int inKeyA, int inKeyB ) {
     
     int hashKey = ( inKeyA * CACHE_PRIME_A + 
                     inKeyB * CACHE_PRIME_B ) % BIOME_CACHE_SIZE;
@@ -591,7 +698,7 @@ static int biomeGetCached( int inX, int inY,
                            int *outSecondPlaceIndex,
                            double *outSecondPlaceGap ) {
     BiomeCacheRecord r =
-        biomeCache[ computeBiomeCacheHash( inX, inY ) ];
+        biomeCache[ computeXYCacheHash( inX, inY ) ];
 
     if( r.x == inX && r.y == inY ) {
         *outSecondPlaceIndex = r.secondPlace;
@@ -610,7 +717,7 @@ static void biomePutCached( int inX, int inY, int inBiome, int inSecondPlace,
                             double inSecondPlaceGap ) {
     BiomeCacheRecord r = { inX, inY, inBiome, inSecondPlace, inSecondPlaceGap };
     
-    biomeCache[ computeBiomeCacheHash( inX, inY ) ] = r;
+    biomeCache[ computeXYCacheHash( inX, inY ) ] = r;
     }
 
 
@@ -704,9 +811,12 @@ static int getMapBiomeIndex( int inX, int inY,
     
     int dbBiome = -1;
     
-    if( anyBiomesInDB ) {
+    if( anyBiomesInDB && 
+        inX >= minBiomeXLoc && inX <= maxBiomeXLoc &&
+        inY >= minBiomeYLoc && inY <= maxBiomeYLoc ) {
         // don't bother with this call unless biome DB has
-        // something in it
+        // something in it, and this inX,inY is in the region where biomes
+        // exist in the database (tutorial loading, or test maps)
         dbBiome = biomeDBGet( inX, inY,
                               &secondPlaceBiome,
                               outSecondPlaceGap );
@@ -1248,9 +1358,14 @@ void outputBiomeFractals() {
 
 
 
-int getMapObjectRaw( int inX, int inY );
 int *getContainedRaw( int inX, int inY, int *outNumContained, 
                       int inSubCont = 0 );
+
+void setMapObjectRaw( int inX, int inY, int inID );
+
+static void dbPut( int inX, int inY, int inSlot, int inValue, 
+                   int inSubCont = 0 );
+
 
 
 
@@ -1356,10 +1471,6 @@ typedef struct DBCacheRecord {
 static DBCacheRecord dbCache[ DB_CACHE_SIZE ];
 
 
-#define CACHE_PRIME_A 776509273
-#define CACHE_PRIME_B 904124281
-#define CACHE_PRIME_C 528383237
-#define CACHE_PRIME_D 148497157
 
 static int computeDBCacheHash( int inKeyA, int inKeyB, 
                                int inKeyC, int inKeyD ) {
@@ -1376,10 +1487,42 @@ static int computeDBCacheHash( int inKeyA, int inKeyB,
 
 
 
-static void initDBCache() {
+
+typedef struct DBTimeCacheRecord {
+        int x, y, slot, subCont;
+        timeSec_t timeVal;
+    } DBTimeCacheRecord;
+    
+static DBTimeCacheRecord dbTimeCache[ DB_CACHE_SIZE ];
+
+
+
+typedef struct BlockingCacheRecord {
+        int x, y;
+        // -1 if not present
+        char blocking;
+    } BlockingCacheRecord;
+    
+static BlockingCacheRecord blockingCache[ DB_CACHE_SIZE ];
+
+
+
+
+
+static void initDBCaches() {
     DBCacheRecord blankRecord = { 0, 0, 0, 0, -2 };
     for( int i=0; i<DB_CACHE_SIZE; i++ ) {
         dbCache[i] = blankRecord;
+        }
+    // 1 for empty (because 0 is a valid value)
+    DBTimeCacheRecord blankTimeRecord = { 0, 0, 0, 0, 1 };
+    for( int i=0; i<DB_CACHE_SIZE; i++ ) {
+        dbTimeCache[i] = blankTimeRecord;
+        }
+    // -1 for empty
+    BlockingCacheRecord blankBlockingRecord = { 0, 0, -1 };
+    for( int i=0; i<DB_CACHE_SIZE; i++ ) {
+        blockingCache[i] = blankBlockingRecord;
         }
     }
 
@@ -1414,7 +1557,74 @@ static void dbPutCached( int inX, int inY, int inSlot, int inSubCont,
 
 
 
+// returns 1 on miss
+static int dbTimeGetCached( int inX, int inY, int inSlot, int inSubCont ) {
+    DBTimeCacheRecord r =
+        dbTimeCache[ computeDBCacheHash( inX, inY, inSlot, inSubCont ) ];
+
+    if( r.x == inX && r.y == inY && 
+        r.slot == inSlot && r.subCont == inSubCont &&
+        r.timeVal != 1 ) {
+        return r.timeVal;
+        }
+    else {
+        return 1;
+        }
+    }
+
+
+
+static void dbTimePutCached( int inX, int inY, int inSlot, int inSubCont, 
+                         timeSec_t inValue ) {
+    DBTimeCacheRecord r = { inX, inY, inSlot, inSubCont, inValue };
+    
+    dbTimeCache[ computeDBCacheHash( inX, inY, inSlot, inSubCont ) ] = r;
+    }
+
+
+
+
+
+// returns -1 on miss
+static char blockingGetCached( int inX, int inY ) {
+    BlockingCacheRecord r =
+        blockingCache[ computeXYCacheHash( inX, inY ) ];
+
+    if( r.x == inX && r.y == inY &&
+        r.blocking != -1 ) {
+        return r.blocking;
+        }
+    else {
+        return -1;
+        }
+    }
+
+
+
+static void blockingPutCached( int inX, int inY, char inBlocking ) {
+    BlockingCacheRecord r = { inX, inY, inBlocking };
+    
+    blockingCache[ computeXYCacheHash( inX, inY ) ] = r;
+    }
+
+
+static void blockingClearCached( int inX, int inY ) {
+    
+    BlockingCacheRecord *r =
+        &( blockingCache[ computeXYCacheHash( inX, inY ) ] );
+
+    if( r->x == inX && r->y == inY ) {
+        r->blocking = -1;
+        }
+    }
+
+
+
+
+
 char lookTimeDBEmpty = false;
+char skipLookTimeCleanup = 0;
+char skipRemovedObjectCleanup = 0;
 
 // if lookTimeDBEmpty, then we init all map cell look times to NOW
 int cellsLookedAtToInit = 0;
@@ -1441,7 +1651,7 @@ int DB_open_timeShrunk(
 
     File dbFile( NULL, path );
     
-    if( ! dbFile.exists() || lookTimeDBEmpty ) {
+    if( ! dbFile.exists() || lookTimeDBEmpty || skipLookTimeCleanup ) {
 
         if( lookTimeDBEmpty ) {
             AppLog::infoF( "No lookTimes present, not cleaning %s", path );
@@ -1454,7 +1664,7 @@ int DB_open_timeShrunk(
                                  key_size,
                                  value_size );
 
-        if( ! error ) {
+        if( ! error && ! skipLookTimeCleanup ) {
             // add look time for cells in this DB to present
             // essentially resetting all look times to NOW
             
@@ -1516,22 +1726,7 @@ int DB_open_timeShrunk(
         return error;
         }
 
-    DB tempDB;
     
-    error = DB_open( &tempDB, 
-                         dbTempName, 
-                         mode,
-                         hash_table_size,
-                         key_size,
-                         value_size );
-    if( error ) {
-        AppLog::errorF( "Failed to open DB file %s in DB_open_timeShrunk",
-                        dbTempName );
-        delete [] dbTempName;
-        DB_close( &oldDB );
-        return error;
-        }
-
 
     
 
@@ -1548,10 +1743,59 @@ int DB_open_timeShrunk(
     
     int total = 0;
     int stale = 0;
-
+    int nonStale = 0;
+    
+    // first, just count
     while( DB_Iterator_next( &dbi, key, value ) > 0 ) {
         total++;
 
+        int x = valueToInt( key );
+        int y = valueToInt( &( key[4] ) );
+
+        if( dbLookTimeGet( x, y ) > 0 ) {
+            // keep
+            nonStale++;
+            }
+        else {
+            // stale
+            // ignore
+            stale++;
+            }
+        }
+
+
+
+    // optimial size for DB of remaining elements
+    unsigned int newSize = DB_getShrinkSize( &oldDB, nonStale );
+
+    AppLog::infoF( "Shrinking hash table in %s from %d down to %d", 
+                   path, 
+                   DB_getCurrentSize( &oldDB ), 
+                   newSize );
+
+
+    DB tempDB;
+    
+    error = DB_open( &tempDB, 
+                         dbTempName, 
+                         mode,
+                         newSize,
+                         key_size,
+                         value_size );
+    if( error ) {
+        AppLog::errorF( "Failed to open DB file %s in DB_open_timeShrunk",
+                        dbTempName );
+        delete [] dbTempName;
+        DB_close( &oldDB );
+        return error;
+        }
+
+
+    // now that we have new temp db properly sized,
+    // iterate again and insert, but don't count
+    DB_Iterator_init( &oldDB, &dbi );
+
+    while( DB_Iterator_next( &dbi, key, value ) > 0 ) {
         int x = valueToInt( key );
         int y = valueToInt( &( key[4] ) );
 
@@ -1563,9 +1807,10 @@ int DB_open_timeShrunk(
         else {
             // stale
             // ignore
-            stale++;
             }
         }
+
+
     
     AppLog::infoF( "Cleaned %d / %d stale map cells from %s", stale, total,
                    path );
@@ -1606,13 +1851,36 @@ int countNewlines( char *inString ) {
 
 
 
+#include "../gameSource/categoryBank.h"
+
+
+// true if ID is a non-pattern category
+char getIsCategory( int inID ) {
+    CategoryRecord *r = getCategory( inID );
+    
+    if( r == NULL ) {
+        return false;
+        }
+    if( r->isPattern ) {
+        return false;
+        }
+    return true;
+    }
+
+
+
+// for large inserts, like tutorial map loads, we don't want to 
+// track individual map changes.
+static char skipTrackingMapChanges = false;
+
 
 
 // returns num set after
 int cleanMap() {
-    AppLog::info( "\nCleaning map of objects that have been removed and "
-                  "variable objects..." );
-
+    AppLog::info( "\nCleaning map of objects that have been removed..." );
+    
+    skipTrackingMapChanges = true;
+    
     DB_Iterator dbi;
     
     
@@ -1631,6 +1899,7 @@ int cleanMap() {
     SimpleVector<int> xContToCheck;
     SimpleVector<int> yContToCheck;
     
+    int totalDBRecordCount = 0;
     
     int totalSetCount = 0;
     int numClearedCount = 0;
@@ -1638,6 +1907,7 @@ int cleanMap() {
     int numContainedCleared = 0;
     
     while( DB_Iterator_next( &dbi, key, value ) > 0 ) {
+        totalDBRecordCount++;
         
         int s = valueToInt( &( key[8] ) );
         int b = valueToInt( &( key[12] ) );
@@ -1650,9 +1920,18 @@ int cleanMap() {
                 
                 ObjectRecord *o = getObject( id );
                 
-                if( o == NULL || o->isVariableDummy ) {
-                    // id doesn't exist anymore or is variable dummy
+                if( o == NULL || getIsCategory( id ) 
+                    || o->description[0] == '@' ) {
+                    // id doesn't exist anymore
                     
+                    // OR it's a non-pattern category
+                    // those should never exist in map
+                    // may be left over from a non-clean shutdown
+                    
+                    // OR object is flagged with @
+                    // this may be a pattern category that is actually
+                    // a place-holder
+
                     numClearedCount++;
                     
                     int x = valueToInt( key );
@@ -1700,6 +1979,9 @@ int cleanMap() {
             SimpleVector< SimpleVector<int> > newSubCont;
             SimpleVector< SimpleVector<timeSec_t> > newSubContDecay;
             
+            char anyRemoved = false;
+            
+
             for( int c=0; c<numCont; c++ ) {
                 
                 SimpleVector<int> subCont;
@@ -1712,7 +1994,7 @@ int cleanMap() {
                     
                     ObjectRecord *o = getObject( - cont[c] );
                     
-                    if( o != NULL && ! o->isVariableDummy ) {
+                    if( o != NULL && ! getIsCategory( - cont[c] ) ) {
                         
                         thisKept = true;
                         
@@ -1728,9 +2010,14 @@ int cleanMap() {
 
                         for( int s=0; s<numSub; s++ ) {
                             
-                            if( getObject( contSub[s] ) != NULL ) {
+                            if( getObject( contSub[s] ) != NULL &&
+                                ! getIsCategory( contSub[s] ) ) {
+                                
                                 subCont.push_back( contSub[s] );
                                 subContDecay.push_back( decaySub[s] );
+                                }
+                            else {
+                                anyRemoved = true;
                                 }
                             }
                         
@@ -1745,17 +2032,23 @@ int cleanMap() {
                     }
                 else {
                     ObjectRecord *o = getObject( cont[c] );
-                    if( o != NULL && ! o->isVariableDummy ) {
+                    if( o != NULL && ! getIsCategory( cont[c] ) ) {
                         
                         thisKept = true;
                         newCont.push_back( cont[c] );
                         newDecay.push_back( decay[c] );
+                        }
+                    else {
+                        anyRemoved = true;
                         }
                     }
 
                 if( thisKept ) {        
                     newSubCont.push_back( subCont );
                     newSubContDecay.push_back( subContDecay );
+                    }
+                else {
+                    anyRemoved = true;
                     }
                 }
             
@@ -1764,41 +2057,44 @@ int cleanMap() {
             delete [] cont;
             delete [] decay;
             
-            numContainedCleared +=
-                ( numCont - newCont.size() );
-
-            int *newContArray = newCont.getElementArray();
-            timeSec_t *newDecayArray = newDecay.getElementArray();
-            
-            setContained( x, y, newCont.size(), newContArray );
-            setContainedEtaDecay( x, y, newDecay.size(), newDecayArray );
-            
-            for( int c=0; c<newCont.size(); c++ ) {
-                int numSub =
-                    newSubCont.getElementDirect( c ).size();
+            if( anyRemoved ) {
                 
-                if( numSub > 0 ) {
-                    int *newSubArray = 
-                        newSubCont.getElementDirect( c ).getElementArray();
-                    timeSec_t *newSubDecayArray = 
-                        newSubContDecay.getElementDirect( c ).getElementArray();
-                    
-                    setContained( x, y, numSub, newSubArray, c + 1 );
-
-                    setContainedEtaDecay( x, y, numSub, newSubDecayArray,
-                                          c + 1 );
-                    
-                    delete [] newSubArray;
-                    delete [] newSubDecayArray;
-                    }
-                else {
-                    clearAllContained( x, y, c + 1 );
-                    }
-                }
+                numContainedCleared +=
+                    ( numCont - newCont.size() );
+                
+                int *newContArray = newCont.getElementArray();
+                timeSec_t *newDecayArray = newDecay.getElementArray();
             
+                setContained( x, y, newCont.size(), newContArray );
+                setContainedEtaDecay( x, y, newDecay.size(), newDecayArray );
+            
+                for( int c=0; c<newCont.size(); c++ ) {
+                    int numSub =
+                        newSubCont.getElementDirect( c ).size();
+                
+                    if( numSub > 0 ) {
+                        int *newSubArray = 
+                            newSubCont.getElementDirect( c ).getElementArray();
+                        timeSec_t *newSubDecayArray = 
+                            newSubContDecay.
+                            getElementDirect( c ).getElementArray();
+                    
+                        setContained( x, y, numSub, newSubArray, c + 1 );
 
-            delete [] newContArray;
-            delete [] newDecayArray;
+                        setContainedEtaDecay( x, y, numSub, newSubDecayArray,
+                                              c + 1 );
+                    
+                        delete [] newSubArray;
+                        delete [] newSubDecayArray;
+                        }
+                    else {
+                        clearAllContained( x, y, c + 1 );
+                        }
+                    }
+
+                delete [] newContArray;
+                delete [] newDecayArray;
+                }
             }
         }
     
@@ -1808,16 +2104,261 @@ int cleanMap() {
     AppLog::infoF( 
         "...%d contained objects present, and %d needed to be cleared.",
         totalNumContained, numContainedCleared );
-
+    AppLog::infoF( "...%d database records total (%d max hash bin depth).", 
+                   totalDBRecordCount, DB_maxStack );
+    
     printf( "\n" );
+
+    skipTrackingMapChanges = false;
+
     return totalSetCount;
     }
 
 
 
 
-void initMap() {
-    initDBCache();
+
+
+
+
+// reads lines from inFile until EOF reached or inTimeLimitSec passes
+// leaves file pos at end of last line read, ready to read more lines
+// on future calls
+// returns true if there's more file to read, or false if end of file reached
+static char loadIntoMapFromFile( FILE *inFile, 
+                                 int inOffsetX = 0, 
+                                 int inOffsetY = 0,
+                                 double inTimeLimitSec = 0 ) {
+
+    skipTrackingMapChanges = true;
+    
+    
+    double startTime = Time::getCurrentTime();
+
+    char moreFileLeft = true;
+
+    // break out when read fails
+    // or if time limit passed
+    while( inTimeLimitSec == 0 || 
+           Time::getCurrentTime() < startTime + inTimeLimitSec ) {
+        
+        TestMapRecord r;
+                
+        char stringBuff[1000];
+                
+        int numRead = fscanf( inFile, "%d %d %d %d %999s", 
+                              &(r.x), &(r.y), &(r.biome),
+                              &(r.floor),
+                              stringBuff );
+                
+        if( numRead != 5 ) {
+            moreFileLeft = false;
+            break;
+            }
+        r.x += inOffsetX;
+        r.y += inOffsetY;
+        
+        int numSlots;
+                
+        char **slots = split( stringBuff, ",", &numSlots );
+                
+        for( int i=0; i<numSlots; i++ ) {
+                    
+            if( i == 0 ) {
+                r.id = atoi( slots[0] );
+                }
+            else {
+                        
+                int numSub;
+                char **subSlots = split( slots[i], ":", &numSub );
+                        
+                for( int j=0; j<numSub; j++ ) {
+                    if( j == 0 ) {
+                        int contID = atoi( subSlots[0] );
+                                
+                        if( numSub > 1 ) {
+                            contID *= -1;
+                            }
+                                
+                        r.contained.push_back( contID );
+                        SimpleVector<int> subVec;
+                                
+                        r.subContained.push_back( subVec );
+                        }
+                    else {
+                        SimpleVector<int> *subVec =
+                            r.subContained.getElement( i - 1 );
+                        subVec->push_back( atoi( subSlots[j] ) );
+                        }
+                    delete [] subSlots[j];
+                    }
+                delete [] subSlots;
+                }
+                    
+            delete [] slots[i];
+            }
+        delete [] slots;
+
+
+
+        // set all test map directly in database
+        biomeDBPut( r.x, r.y, r.biome, r.biome, 0.5 );
+                
+        dbFloorPut( r.x, r.y, r.floor );
+
+        setMapObject( r.x, r.y, r.id );
+                
+        int *contArray = r.contained.getElementArray();
+                
+        setContained( r.x, r.y, r.contained.size(), contArray );
+        delete [] contArray;
+                
+        for( int c=0; c<r.contained.size(); c++ ) {
+
+            int *subContArray = 
+                r.subContained.getElement( c )->getElementArray();
+                    
+            setContained( r.x, r.y, 
+                          r.subContained.getElement(c)->size(),
+                          subContArray, c + 1 );
+                    
+            delete [] subContArray;
+            }
+        }
+
+    skipTrackingMapChanges = false;
+
+    return moreFileLeft;
+    }
+
+
+
+static inline void changeContained( int inX, int inY, int inSlot, 
+                                    int inSubCont, int inID ) {
+    dbPut( inX, inY, FIRST_CONT_SLOT + inSlot, inID, inSubCont );    
+    }
+
+
+
+typedef struct GlobalTriggerState {
+        SimpleVector<GridPos> triggerOnLocations;
+        
+        // receivers for this trigger that are waiting to be turned on
+        SimpleVector<GridPos> receiverLocations;
+        
+        SimpleVector<GridPos> triggeredLocations;
+        SimpleVector<int> triggeredIDs;
+        // what we revert to when global trigger turns off (back to receiver)
+        SimpleVector<int> triggeredRevertIDs;
+    } GlobalTriggerState;
+        
+
+
+static SimpleVector<GlobalTriggerState> globalTriggerStates;
+
+
+static int numSpeechPipes = 0;
+
+static SimpleVector<GridPos> *speechPipesIn = NULL;
+
+static SimpleVector<GridPos> *speechPipesOut = NULL;
+
+
+
+static SimpleVector<GridPos> flightLandingPos;
+
+
+
+static char isAdjacent( GridPos inPos, int inX, int inY ) {
+    if( inX <= inPos.x + 1 &&
+        inX >= inPos.x - 1 &&
+        inY <= inPos.y + 1 &&
+        inY >= inPos.y - 1 ) {
+        return true;
+        }
+    return false;
+    }
+
+
+
+void getSpeechPipesIn( int inX, int inY, SimpleVector<int> *outIndicies ) {
+    for( int i=0; i<numSpeechPipes; i++ ) {
+        
+        for( int p=0; p<speechPipesIn[ i ].size(); p++ ) {
+            
+            GridPos inPos = speechPipesIn[i].getElementDirect( p );
+            if( isAdjacent( inPos, inX, inY ) ) {
+                 
+                // make sure pipe-in is still here
+                int id = getMapObjectRaw( inPos.x, inPos.y );
+                    
+                char stillHere = false;
+            
+                if( id > 0 ) {
+                    ObjectRecord *oIn = getObject( id );
+                
+                    if( oIn->speechPipeIn && 
+                        oIn->speechPipeIndex == i ) {
+                        stillHere = true;
+                        }
+                    }
+                if( ! stillHere ) {
+                    speechPipesIn[ i ].deleteElement( p );
+                    p--;
+                    }
+                else {
+                    outIndicies->push_back( i );
+                    break;
+                    }
+                }
+            }
+        }
+    }
+
+
+
+SimpleVector<GridPos> *getSpeechPipesOut( int inIndex ) {
+    // first, filter them to make sure they are all still here
+    for( int p=0; p<speechPipesOut[ inIndex ].size(); p++ ) {
+        
+        GridPos outPos = speechPipesOut[ inIndex ].getElementDirect( p );
+        // make sure pipe-out is still here
+        int id = getMapObjectRaw( outPos.x, outPos.y );
+        
+        char stillHere = false;
+        
+        if( id > 0 ) {
+            ObjectRecord *oOut = getObject( id );
+            
+            if( oOut->speechPipeOut && 
+                oOut->speechPipeIndex == inIndex ) {
+                stillHere = true;
+                }
+            }
+        if( ! stillHere ) {
+            speechPipesOut[ inIndex ].deleteElement( p );
+            p--;
+            }
+        }
+    
+    return &( speechPipesOut[ inIndex ] );
+    }
+
+
+
+
+
+
+char initMap() {
+    
+    numSpeechPipes = getMaxSpeechPipeIndex() + 1;
+    
+    speechPipesIn = new SimpleVector<GridPos>[ numSpeechPipes ];
+    speechPipesOut = new SimpleVector<GridPos>[ numSpeechPipes ];
+    
+
+
+    initDBCaches();
     initBiomeCache();
 
     mapCacheClear();
@@ -1956,6 +2497,18 @@ void initMap() {
     char lookTimeDBExists = false;
     
     File lookTimeDBFile( NULL, lookTimeDBName );
+
+
+
+    if( lookTimeDBFile.exists() &&
+        SettingsManager::getIntSetting( "flushLookTimes", 0 ) ) {
+        
+        AppLog::info( "flushLookTimes.ini set, deleting lookTime.db" );
+        
+        lookTimeDBFile.remove();
+        }
+
+
     
     lookTimeDBExists = lookTimeDBFile.exists();
 
@@ -1963,9 +2516,22 @@ void initMap() {
         lookTimeDBEmpty = true;
         }
 
-    DB lookTimeDB_old;
 
-    int error = DB_open( &lookTimeDB_old, 
+    skipLookTimeCleanup = 
+        SettingsManager::getIntSetting( "skipLookTimeCleanup", 0 );
+
+
+    if( skipLookTimeCleanup ) {
+        AppLog::info( "skipLookTimeCleanup.ini flag set, "
+                      "not cleaning databases based on stale look times." );
+        }
+
+    LINEARDB3_setMaxLoad( 0.80 );
+    
+    if( ! skipLookTimeCleanup ) {
+        DB lookTimeDB_old;
+        
+        int error = DB_open( &lookTimeDB_old, 
                              lookTimeDBName, 
                              KISSDB_OPEN_MODE_RWCREAT,
                              80000,
@@ -1975,100 +2541,130 @@ void initMap() {
                                // "double" on the server platform uses
                              );
     
-    if( error ) {
-        AppLog::errorF( "Error %d opening look time KissDB", error );
-        return;
-        }
-    
-    lookTimeDBOpen = true;
-
-    
-
-    int staleSec = SettingsManager::getIntSetting( "mapCellForgottenSeconds", 
-                                                   0 );
-    
-    if( lookTimeDBExists && staleSec > 0 ) {
-        AppLog::info( "\nCleaning stale look times from map..." );
-
-
-        static DB lookTimeDB_temp;
-        
-        const char *lookTimeDBName_temp = "lookTime_temp.db";
-
-        File tempDBFile( NULL, lookTimeDBName_temp );
-        
-        if( tempDBFile.exists() ) {
-            tempDBFile.remove();
+        if( error ) {
+            AppLog::errorF( "Error %d opening look time KissDB", error );
+            return false;
             }
+    
+
+        int staleSec = 
+            SettingsManager::getIntSetting( "mapCellForgottenSeconds", 0 );
+    
+        if( lookTimeDBExists && staleSec > 0 ) {
+            AppLog::info( "\nCleaning stale look times from map..." );
+            
+            
+            static DB lookTimeDB_temp;
+        
+            const char *lookTimeDBName_temp = "lookTime_temp.db";
+
+            File tempDBFile( NULL, lookTimeDBName_temp );
+        
+            if( tempDBFile.exists() ) {
+                tempDBFile.remove();
+                }
         
 
-        error = DB_open( &lookTimeDB_temp, 
+        
+            DB_Iterator dbi;
+        
+        
+            DB_Iterator_init( &lookTimeDB_old, &dbi );
+        
+    
+            timeSec_t curTime = MAP_TIMESEC;
+        
+            unsigned char key[8];
+            unsigned char value[8];
+
+            int total = 0;
+            int stale = 0;
+            int nonStale = 0;
+            
+            // first, just count them
+            while( DB_Iterator_next( &dbi, key, value ) > 0 ) {
+                total++;
+
+                timeSec_t t = valueToTime( value );
+            
+                if( curTime - t >= staleSec ) {
+                    // stale cell
+                    // ignore
+                    stale++;
+                    }
+                else {
+                    // non-stale
+                    nonStale++;
+                    }
+                }
+
+            // optimial size for DB of remaining elements
+            unsigned int newSize = DB_getShrinkSize( &lookTimeDB_old,
+                                                     nonStale );
+            
+            AppLog::infoF( "Shrinking hash table for lookTimes from "
+                           "%d down to %d", 
+                           DB_getCurrentSize( &lookTimeDB_old ), 
+                           newSize );
+            
+
+            error = DB_open( &lookTimeDB_temp, 
                              lookTimeDBName_temp, 
                              KISSDB_OPEN_MODE_RWCREAT,
-                             80000,
+                             newSize,
                              8, // two 32-bit ints, xy
                              8 // one 64-bit double, representing an ETA time
                              // in whatever binary format and byte order
                              // "double" on the server platform uses
                              );
     
-        if( error ) {
-            AppLog::errorF( "Error %d opening look time temp KissDB", error );
-            return;
-            }
-        
-        DB_Iterator dbi;
-        
-        
-        DB_Iterator_init( &lookTimeDB_old, &dbi );
-        
-    
-        timeSec_t curTime = MAP_TIMESEC;
-        
-        unsigned char key[8];
-        unsigned char value[8];
-
-        int total = 0;
-        int stale = 0;
-
-        while( DB_Iterator_next( &dbi, key, value ) > 0 ) {
-            total++;
-
-            timeSec_t t = valueToTime( value );
+            if( error ) {
+                AppLog::errorF( 
+                    "Error %d opening look time temp KissDB", error );
+                return false;
+                }
             
-            if( curTime - t >= staleSec ) {
-                // stale cell
-                // ignore
-                stale++;
-                }
-            else {
-                // non-stale
-                // insert it in temp
-                DB_put_new( &lookTimeDB_temp, key, value );
-                }
-            }
+
+            // now that we have new temp db properly sized,
+            // iterate again and insert
+            DB_Iterator_init( &lookTimeDB_old, &dbi );
         
-        AppLog::infoF( "Cleaned %d / %d stale look times", stale, total );
+            while( DB_Iterator_next( &dbi, key, value ) > 0 ) {
+                timeSec_t t = valueToTime( value );
+            
+                if( curTime - t >= staleSec ) {
+                    // stale cell
+                    // ignore
+                    }
+                else {
+                    // non-stale
+                    // insert it in temp
+                    DB_put_new( &lookTimeDB_temp, key, value );
+                    }
+                }
 
-        printf( "\n" );
 
-        if( total == 0 ) {
-            lookTimeDBEmpty = true;
+            AppLog::infoF( "Cleaned %d / %d stale look times", stale, total );
+
+            printf( "\n" );
+
+            if( total == 0 ) {
+                lookTimeDBEmpty = true;
+                }
+
+            DB_close( &lookTimeDB_temp );
+            DB_close( &lookTimeDB_old );
+
+            tempDBFile.copy( &lookTimeDBFile );
+            tempDBFile.remove();
             }
-
-        DB_close( &lookTimeDB_temp );
-        DB_close( &lookTimeDB_old );
-
-        tempDBFile.copy( &lookTimeDBFile );
-        tempDBFile.remove();
+        else {
+            DB_close( &lookTimeDB_old );
+            }
         }
-    else {
-        DB_close( &lookTimeDB_old );
-        }
-    
 
 
-    error = DB_open( &lookTimeDB, 
+    int error = DB_open( &lookTimeDB, 
                          lookTimeDBName, 
                          KISSDB_OPEN_MODE_RWCREAT,
                          80000,
@@ -2080,9 +2676,11 @@ void initMap() {
     
     if( error ) {
         AppLog::errorF( "Error %d opening look time KissDB", error );
-        return;
+        return false;
         }
-
+    
+    lookTimeDBOpen = true;
+    
     
 
 
@@ -2123,7 +2721,7 @@ void initMap() {
     
     if( error ) {
         AppLog::errorF( "Error %d opening map KissDB", error );
-        return;
+        return false;
         }
     
     dbOpen = true;
@@ -2161,7 +2759,7 @@ void initMap() {
     
     if( error ) {
         AppLog::errorF( "Error %d opening map time KissDB", error );
-        return;
+        return false;
         }
     
     timeDBOpen = true;
@@ -2185,7 +2783,7 @@ void initMap() {
     
     if( error ) {
         AppLog::errorF( "Error %d opening biome KissDB", error );
-        return;
+        return false;
         }
     
     biomeDBOpen = true;
@@ -2197,14 +2795,36 @@ void initMap() {
     DB_Iterator biomeDBi;
     DB_Iterator_init( &biomeDB, &biomeDBi );
     
-    unsigned char *biomeKey[8];
-    unsigned char *biomeValue[12];
+    unsigned char biomeKey[8];
+    unsigned char biomeValue[12];
     
-    if( DB_Iterator_next( &biomeDBi, biomeKey, biomeValue ) ) {
-        // only check for the first one
+
+    while( DB_Iterator_next( &biomeDBi, biomeKey, biomeValue ) > 0 ) {
+        int x = valueToInt( biomeKey );
+        int y = valueToInt( &( biomeKey[4] ) );
+        
         anyBiomesInDB = true;
+        
+        if( x > maxBiomeXLoc ) {
+            maxBiomeXLoc = x;
+            }
+        if( x < minBiomeXLoc ) {
+            minBiomeXLoc = x;
+            }
+        if( y > maxBiomeYLoc ) {
+            maxBiomeYLoc = y;
+            }
+        if( y < minBiomeYLoc ) {
+            minBiomeYLoc = y;
+            }
         }
     
+    printf( "Min (x,y) of biome in db = (%d,%d), "
+            "Max (x,y) of biome in db = (%d,%d)\n",
+            minBiomeXLoc, minBiomeYLoc,
+            maxBiomeXLoc, maxBiomeYLoc );
+    
+            
 
 
     error = DB_open_timeShrunk( &floorDB, 
@@ -2217,7 +2837,7 @@ void initMap() {
     
     if( error ) {
         AppLog::errorF( "Error %d opening floor KissDB", error );
-        return;
+        return false;
         }
     
     floorDBOpen = true;
@@ -2236,7 +2856,7 @@ void initMap() {
     
     if( error ) {
         AppLog::errorF( "Error %d opening floor time KissDB", error );
-        return;
+        return false;
         }
     
     floorTimeDBOpen = true;
@@ -2260,10 +2880,61 @@ void initMap() {
     
     if( error ) {
         AppLog::errorF( "Error %d opening eve KissDB", error );
-        return;
+        return false;
         }
     
     eveDBOpen = true;
+
+
+
+
+    error = DB_open( &metaDB, 
+                     "meta.db", 
+                     KISSDB_OPEN_MODE_RWCREAT,
+                     // starting size doesn't matter here
+                     500,
+                     4, // one 32-bit int as key
+                     // data
+                     MAP_METADATA_LENGTH
+                     );
+    
+    if( error ) {
+        AppLog::errorF( "Error %d opening meta KissDB", error );
+        return false;
+        }
+    
+    metaDBOpen = true;
+
+    DB_Iterator metaIterator;
+    
+    DB_Iterator_init( &metaDB, &metaIterator );
+
+    unsigned char metaKey[4];
+    
+    unsigned char metaValue[MAP_METADATA_LENGTH];
+
+    int maxMetaID = 0;
+    int numMetaRecords = 0;
+    
+    while( DB_Iterator_next( &metaIterator, metaKey, metaValue ) > 0 ) {
+        numMetaRecords++;
+        
+        int metaID = valueToInt( metaKey );
+
+        if( metaID > maxMetaID ) {
+            maxMetaID = metaID;
+            }
+        }
+    
+    AppLog::infoF( 
+        "MetadataDB:  Found %d records with max MetadataID of %d",
+        numMetaRecords, maxMetaID );
+    
+    setLastMetadataID( maxMetaID );
+    
+
+
+    
 
 
     if( lookTimeDBEmpty && cellsLookedAtToInit > 0 ) {
@@ -2343,15 +3014,116 @@ void initMap() {
     
     delete [] allObjects;
 
-
-    int totalSetCount = cleanMap();
     
+    skipRemovedObjectCleanup = 
+        SettingsManager::getIntSetting( "skipRemovedObjectCleanup", 0 );
+
+
+
+
+    
+    FILE *dummyFile = fopen( "mapDummyRecall.txt", "r" );
+    
+    if( dummyFile != NULL ) {
+        AppLog::info( "Found mapDummyRecall.txt file, restoring dummy objects "
+                      "on map" );
+        
+        skipTrackingMapChanges = true;
+        
+        int numRead = 5;
+        
+        int numSet = 0;
+        
+        int numStale = 0;
+
+        while( numRead == 5 || numRead == 7 ) {
+            
+            int x, y, parentID, dummyIndex, slot, b;
+            
+            char marker;            
+            
+            slot = -1;
+            b = 0;
+            
+            numRead = fscanf( dummyFile, "(%d,%d) %c %d %d [%d %d]\n", 
+                              &x, &y, &marker, &parentID, &dummyIndex,
+                              &slot, &b );
+            if( numRead == 5 || numRead == 7 ) {
+
+                if( dbLookTimeGet( x, y ) <= 0 ) {
+                    // stale area of map
+                    numStale++;
+                    continue;
+                    }                
+                
+                ObjectRecord *parent = getObject( parentID );
+                
+                int dummyID = -1;
+                
+                if( parent != NULL ) {
+                    
+                    if( marker == 'u' && parent->numUses-1 > dummyIndex ) {
+                        dummyID = parent->useDummyIDs[ dummyIndex ];
+                        }
+                    else if( marker == 'v' && 
+                             parent->numVariableDummyIDs > dummyIndex ) {
+                        dummyID = parent->variableDummyIDs[ dummyIndex ];
+                        }
+                    }
+                if( dummyID > 0 ) {
+                    if( numRead == 5 ) {
+                        setMapObjectRaw( x, y, dummyID );
+                        }
+                    else {
+                        changeContained( x, y, slot, b, dummyID );
+                        }
+                    numSet++;
+                    }
+                }
+            }
+        skipTrackingMapChanges = false;
+        
+        fclose( dummyFile );
+        
+        
+        AppLog::infoF( "Restored %d dummy objects to map "
+                       "(%d skipped as stale)", numSet, numStale );
+        
+        remove( "mapDummyRecall.txt" );
+        
+        printf( "\n" );
+        }
+
+
+
+    // clean map after restoring dummy objects
+    int totalSetCount = 1;
+
+    if( ! skipRemovedObjectCleanup ) {
+        totalSetCount = cleanMap();
+        }
+    else {
+        AppLog::info( "Skipping cleaning map of removed objects" );
+        }
+    
+
+
     
     if( totalSetCount == 0 ) {
         // map has been cleared
 
         // ignore old value for placements
         clearRecentPlacements();
+        }
+
+
+
+    globalTriggerStates.deleteAll();
+    
+    int numTriggers = getNumGlobalTriggers();
+    for( int i=0; i<numTriggers; i++ ) {
+        GlobalTriggerState s;
+        globalTriggerStates.push_back( s );
         }
 
 
@@ -2376,88 +3148,7 @@ void initMap() {
             
             printf( "Loading testMap.txt\n" );
             
-            // break out when read fails
-            while( true ) {
-                TestMapRecord r;
-                
-                char stringBuff[1000];
-                
-                int numRead = fscanf( testMapFile, "%d %d %d %d %999s", 
-                                      &(r.x), &(r.y), &(r.biome),
-                                      &(r.floor),
-                                      stringBuff );
-                
-                if( numRead != 5 ) {
-                    break;
-                    }
-                
-                int numSlots;
-                
-                char **slots = split( stringBuff, ",", &numSlots );
-                
-                for( int i=0; i<numSlots; i++ ) {
-                    
-                    if( i == 0 ) {
-                        r.id = atoi( slots[0] );
-                        }
-                    else {
-                        
-                        int numSub;
-                        char **subSlots = split( slots[i], ":", &numSub );
-                        
-                        for( int j=0; j<numSub; j++ ) {
-                            if( j == 0 ) {
-                                int contID = atoi( subSlots[0] );
-                                
-                                if( numSub > 1 ) {
-                                    contID *= -1;
-                                    }
-                                
-                                r.contained.push_back( contID );
-                                SimpleVector<int> subVec;
-                                
-                                r.subContained.push_back( subVec );
-                                }
-                            else {
-                                SimpleVector<int> *subVec =
-                                    r.subContained.getElement( i - 1 );
-                                subVec->push_back( atoi( subSlots[j] ) );
-                                }
-                            delete [] subSlots[j];
-                            }
-                        delete [] subSlots;
-                        }
-                    
-                    delete [] slots[i];
-                    }
-                delete [] slots;
-
-
-
-                // set all test map directly in database
-                biomeDBPut( r.x, r.y, r.biome, r.biome, 0.5 );
-                
-                dbFloorPut( r.x, r.y, r.floor );
-
-                setMapObject( r.x, r.y, r.id );
-                
-                int *contArray = r.contained.getElementArray();
-                
-                setContained( r.x, r.y, r.contained.size(), contArray );
-                delete [] contArray;
-                
-                for( int c=0; c<r.contained.size(); c++ ) {
-
-                    int *subContArray = 
-                        r.subContained.getElement( c )->getElementArray();
-                    
-                    setContained( r.x, r.y, 
-                                  r.subContained.getElement(c)->size(),
-                                  subContArray, c + 1 );
-                    
-                    delete [] subContArray;
-                    }
-                }
+            loadIntoMapFromFile( testMapFile );
 
             fclose( testMapFile );
             testMapFile = NULL;
@@ -2483,6 +3174,8 @@ void initMap() {
     //outputMapImage();
 
     //outputBiomeFractals();
+
+    return true;
     }
 
 
@@ -2500,9 +3193,70 @@ void freeAndNullString( char **inStringPointer ) {
 
 
 
-void freeMap() {
+static void rememberDummy( FILE *inFile, int inX, int inY, 
+                           ObjectRecord *inDummyO, 
+                           int inSlot = -1, int inB = 0 ) {
+    
+    if( inFile == NULL ) {
+        return;
+        }
+    
+    int parent = -1;
+    int dummyIndex = -1;
+
+    char marker = 'x';
+
+    if( inDummyO->isUseDummy ) {
+        marker = 'u';
+        
+        parent = inDummyO->useDummyParent;
+        ObjectRecord *parentO = getObject( parent );
+        
+        if( parentO != NULL ) {    
+            for( int i=0; i<parentO->numUses - 1; i++ ) {
+                if( parentO->useDummyIDs[i] == inDummyO->id ) {
+                    dummyIndex = i;
+                    break;
+                    }
+                }
+            }
+        }
+    else if( inDummyO->isVariableDummy ) {
+        marker = 'v';
+        
+        parent = inDummyO->variableDummyParent;
+        ObjectRecord *parentO = getObject( parent );
+        
+        if( parentO != NULL ) {    
+            for( int i=0; i<parentO->numVariableDummyIDs; i++ ) {
+                if( parentO->variableDummyIDs[i] == inDummyO->id ) {
+                    dummyIndex = i;
+                    break;
+                    }
+                }
+            }
+        }
+    
+    if( parent > 0 && dummyIndex >= 0 ) {
+        if( inSlot == -1 && inB == 0 ) {   
+            fprintf( inFile, "(%d,%d) %c %d %d\n", 
+                     inX, inY, 
+                     marker, parent, dummyIndex );
+            }
+        else {
+            fprintf( inFile, "(%d,%d) %c %d %d [%d %d]\n", 
+                     inX, inY, 
+                     marker, parent, dummyIndex, inSlot, inB );
+            }
+        }
+    }
+
+
+
+void freeMap( char inSkipCleanup ) {
     printf( "%d calls to getBaseMap\n", getBaseMapCallCount );
 
+    skipTrackingMapChanges = true;
     
     if( lookTimeDBOpen ) {
         DB_close( &lookTimeDB );
@@ -2510,7 +3264,7 @@ void freeMap() {
         }
 
 
-    if( dbOpen ) {
+    if( dbOpen && ! inSkipCleanup ) {
         
         AppLog::infoF( "Cleaning up map database on server shutdown." );
         
@@ -2543,128 +3297,200 @@ void freeMap() {
         SimpleVector<int> bContToCheck;
         
         
-        while( DB_Iterator_next( &dbi, key, value ) > 0 ) {
+        int skipUseDummyCleanup = 
+            SettingsManager::getIntSetting( "skipUseDummyCleanup", 0 );
         
-            int s = valueToInt( &( key[8] ) );
-            int b = valueToInt( &( key[12] ) );
-       
-            if( s == 0 ) {
-                int id = valueToInt( value );
+        
+
+        
+        if( !skipUseDummyCleanup ) {    
             
-                if( id > 0 ) {
+            FILE *dummyFile = fopen( "mapDummyRecall.txt", "w" );
+            
+            while( DB_Iterator_next( &dbi, key, value ) > 0 ) {
+        
+                int s = valueToInt( &( key[8] ) );
+                int b = valueToInt( &( key[12] ) );
+       
+                if( s == 0 ) {
+                    int id = valueToInt( value );
+            
+                    if( id > 0 ) {
                     
-                    ObjectRecord *mapO = getObject( id );
+                        ObjectRecord *mapO = getObject( id );
                     
                     
-                    if( mapO != NULL && mapO->isUseDummy ) {
+                        if( mapO != NULL ) {
+                            if( mapO->isUseDummy ) {
+                                int x = valueToInt( key );
+                                int y = valueToInt( &( key[4] ) );
+                    
+                                xToPlace.push_back( x );
+                                yToPlace.push_back( y );
+                                idToPlace.push_back( mapO->useDummyParent );
+                                
+                                rememberDummy( dummyFile, x, y, mapO );
+                                }
+                            else if( mapO->isVariableDummy ) {
+                                int x = valueToInt( key );
+                                int y = valueToInt( &( key[4] ) );
+                            
+                                xToPlace.push_back( x );
+                                yToPlace.push_back( y );
+                                idToPlace.push_back( 
+                                    mapO->variableDummyParent );
+                                
+                                rememberDummy( dummyFile, x, y, mapO );
+                                }
+                            }
+                        }
+                    }
+                else if( s == 2 ) {
+                    int numSlots = valueToInt( value );
+                    if( numSlots > 0 ) {
                         int x = valueToInt( key );
                         int y = valueToInt( &( key[4] ) );
-                    
-                        xToPlace.push_back( x );
-                        yToPlace.push_back( y );
-                        idToPlace.push_back( mapO->useDummyParent );
+                        xContToCheck.push_back( x );
+                        yContToCheck.push_back( y );
+                        bContToCheck.push_back( b );
                         }
                     }
                 }
-            else if( s == 2 ) {
-                int numSlots = valueToInt( value );
-                if( numSlots > 0 ) {
-                    int x = valueToInt( key );
-                    int y = valueToInt( &( key[4] ) );
-                    xContToCheck.push_back( x );
-                    yContToCheck.push_back( y );
-                    bContToCheck.push_back( b );
-                    }
-                }
-            }
         
 
-        for( int i=0; i<xToPlace.size(); i++ ) {
-            int x = xToPlace.getElementDirect( i );
-            int y = yToPlace.getElementDirect( i );
+            for( int i=0; i<xToPlace.size(); i++ ) {
+                int x = xToPlace.getElementDirect( i );
+                int y = yToPlace.getElementDirect( i );
             
-            setMapObject( x, y, idToPlace.getElementDirect( i ) );
-            }
-
-        
-        int numContChanged = 0;
-        
-        for( int i=0; i<xContToCheck.size(); i++ ) {
-            int x = xContToCheck.getElementDirect( i );
-            int y = yContToCheck.getElementDirect( i );
-            int b = bContToCheck.getElementDirect( i );
-        
-            if( getMapObjectRaw( x, y ) != 0 ) {
-
-                int numCont;
-                int *cont = getContainedRaw( x, y, &numCont, b );
-
-                for( int c=0; c<numCont; c++ ) {
-
-                    char subCont = false;
-                    
-                    if( cont[c] < 0 ) {
-                        cont[c] *= -1;
-                        subCont = true;
-                        }
-                    
-                    ObjectRecord *contObj = getObject( cont[c] );
-                    
-                    if( contObj != NULL && contObj->isUseDummy ) {
-                        cont[c] = contObj->useDummyParent;
-                        numContChanged ++;
-                        }
-                   
-                    if( subCont ) {
-                        cont[c] *= -1;
-                        }
-                    }
-                
-                setContained( x, y, numCont, cont, b );
-                delete [] cont;
+                setMapObjectRaw( x, y, idToPlace.getElementDirect( i ) );
                 }
+
+        
+            int numContChanged = 0;
+        
+            for( int i=0; i<xContToCheck.size(); i++ ) {
+                int x = xContToCheck.getElementDirect( i );
+                int y = yContToCheck.getElementDirect( i );
+                int b = bContToCheck.getElementDirect( i );
+        
+                if( getMapObjectRaw( x, y ) != 0 ) {
+
+                    int numCont;
+                    int *cont = getContainedRaw( x, y, &numCont, b );
+                
+                    char anyChanged = false;
+
+                    for( int c=0; c<numCont; c++ ) {
+
+                        char subCont = false;
+                    
+                        if( cont[c] < 0 ) {
+                            cont[c] *= -1;
+                            subCont = true;
+                            }
+                    
+                        ObjectRecord *contObj = getObject( cont[c] );
+                    
+                        if( contObj != NULL ) {
+                            if( contObj->isUseDummy ) {
+                                cont[c] = contObj->useDummyParent;
+                                rememberDummy( dummyFile, x, y, contObj, c, b );
+                            
+                                anyChanged = true;
+                                numContChanged ++;
+                                }
+                            else if( contObj->isVariableDummy ) {
+                                cont[c] = contObj->variableDummyParent;
+                                rememberDummy( dummyFile, x, y, contObj, c, b );
+                            
+                                anyChanged = true;
+                                numContChanged ++;
+                                }
+                            }
+                   
+                        if( subCont ) {
+                            cont[c] *= -1;
+                            }
+                        }
+                
+                    if( anyChanged ) {
+                        setContained( x, y, numCont, cont, b );
+                        }
+                
+                    delete [] cont;
+                    }
+                }
+                    
+            if( dummyFile != NULL ) {
+                fclose( dummyFile );
+                }
+            
+            AppLog::infoF(
+                "...%d useDummy/variable objects present that were changed "
+                "back into their unused parent.",
+                xToPlace.size() );
+            AppLog::infoF( 
+                "...%d contained useDummy/variable objects present and changed "
+                "back to usused parent.",
+                numContChanged );
             }
-
-
-        AppLog::infoF( "...%d useDummy objects present that were changed "
-                       "back into their unused parent.",
-                       xToPlace.size() );
-        AppLog::infoF( 
-            "...%d contained useDummy objects present and changed "
-            "back to usused parent.",
-            numContChanged );
-
+        else {
+            AppLog::info( "Skipping use dummy cleanup." );
+            }
+        
         printf( "\n" );
 
-        AppLog::info( "Now running normal map clean..." );
-        cleanMap();
-
+        if( ! skipRemovedObjectCleanup ) {
+            AppLog::info( "Now running normal map clean..." );
+            cleanMap();
+            }
+        else {
+            AppLog::info( "Skipping running normal map clean." );
+            }
+        
         
         DB_close( &db );
+        dbOpen = false;
         }
-
+    else if( dbOpen ) {
+        // just close with no cleanup
+        DB_close( &db );
+        dbOpen = false;
+        }
+    
     if( timeDBOpen ) {
         DB_close( &timeDB );
+        timeDBOpen = false;
         }
 
     if( biomeDBOpen ) {
         DB_close( &biomeDB );
+        biomeDBOpen = false;
         }
 
 
     if( floorDBOpen ) {
         DB_close( &floorDB );
+        floorDBOpen = false;
         }
 
     if( floorTimeDBOpen ) {
         DB_close( &floorTimeDB );
+        floorTimeDBOpen = false;
         }
 
 
     if( eveDBOpen ) {
         DB_close( &eveDB );
+        eveDBOpen = false;
+        }
+
+    if( metaDBOpen ) {
+        DB_close( &metaDB );
+        metaDBOpen = false;
         }
     
+
     writeEveRadius();
     writeRecentPlacements();
 
@@ -2685,6 +3511,17 @@ void freeMap() {
     liveMovements.clear();
     
     mapChangePosSinceLastStep.deleteAll();
+    
+    skipTrackingMapChanges = false;
+    
+    
+    delete [] speechPipesIn;
+    delete [] speechPipesOut;
+    
+    speechPipesIn = NULL;
+    speechPipesOut = NULL;
+
+    flightLandingPos.deleteAll();
     }
 
 
@@ -2709,6 +3546,7 @@ void wipeMapFiles() {
     deleteFileByName( "map.db" );
     deleteFileByName( "mapTime.db" );
     deleteFileByName( "playerStats.db" );
+    deleteFileByName( "meta.db" );
     }
 
 
@@ -2722,6 +3560,7 @@ static int dbGet( int inX, int inY, int inSlot, int inSubCont = 0 ) {
     
     int cachedVal = dbGetCached( inX, inY, inSlot, inSubCont );
     if( cachedVal != -2 ) {
+        
         return cachedVal;
         }
     
@@ -2756,6 +3595,14 @@ static int dbGet( int inX, int inY, int inSlot, int inSubCont = 0 ) {
 
 // returns 0 if not found
 static timeSec_t dbTimeGet( int inX, int inY, int inSlot, int inSubCont = 0 ) {
+
+    timeSec_t cachedVal = dbTimeGetCached( inX, inY, inSlot, inSubCont );
+    if( cachedVal != 1 ) {
+        
+        return cachedVal;
+        }
+
+    
     unsigned char key[16];
     unsigned char value[8];
 
@@ -2764,13 +3611,19 @@ static timeSec_t dbTimeGet( int inX, int inY, int inSlot, int inSubCont = 0 ) {
     
     int result = DB_get( &timeDB, key, value );
     
+    timeSec_t timeVal;
+    
     if( result == 0 ) {
         // found
-        return valueToTime( value );
+        timeVal = valueToTime( value );
         }
     else {
-        return 0;
+        timeVal = 0;
         }
+
+    dbTimePutCached( inX, inY, inSlot, inSubCont, timeVal );
+    
+    return timeVal;
     }
 
 
@@ -2786,7 +3639,9 @@ static int dbFloorGet( int inX, int inY ) {
     
     if( result == 0 ) {
         // found
-        return valueToInt( value );
+        int returnVal = valueToInt( value );
+        
+        return returnVal;
         }
     else {
         return -1;
@@ -2820,7 +3675,7 @@ timeSec_t dbLookTimeGet( int inX, int inY ) {
     unsigned char key[8];
     unsigned char value[8];
 
-    intPairToKey( inX, inY, key );
+    intPairToKey( inX/100, inY/100, key );
     
     int result = DB_get( &lookTimeDB, key, value );
     
@@ -2837,30 +3692,40 @@ timeSec_t dbLookTimeGet( int inX, int inY ) {
 
 
 static void dbPut( int inX, int inY, int inSlot, int inValue, 
-                   int inSubCont = 0 ) {
+                   int inSubCont ) {
     
-    // count all slot changes as changes, because we're storing
-    // time in a separate database now (so we don't need to worry
-    // about time changes being reported as map changes)
-    
-    char found = false;
-    for( int i=0; i<mapChangePosSinceLastStep.size(); i++ ) {
-            
-        ChangePosition *p = mapChangePosSinceLastStep.getElement( i );
-        
-        if( p->x == inX && p->y == inY ) {
-            found = true;
-            
-            // update it
-            p->responsiblePlayerID = currentResponsiblePlayer;
-            break;
-            }
+    if( inSlot == 0 && inSubCont == 0 ) {
+        // object has changed
+        // clear blocking cache
+        blockingClearCached( inX, inY );
         }
+    
+
+    if( ! skipTrackingMapChanges ) {
         
-    if( ! found ) {
-        ChangePosition p = { inX, inY, false, currentResponsiblePlayer,
-                             0, 0, 0.0 };
-        mapChangePosSinceLastStep.push_back( p );
+        // count all slot changes as changes, because we're storing
+        // time in a separate database now (so we don't need to worry
+        // about time changes being reported as map changes)
+        
+        char found = false;
+        for( int i=0; i<mapChangePosSinceLastStep.size(); i++ ) {
+            
+            ChangePosition *p = mapChangePosSinceLastStep.getElement( i );
+            
+            if( p->x == inX && p->y == inY ) {
+                found = true;
+                
+                // update it
+                p->responsiblePlayerID = currentResponsiblePlayer;
+                break;
+                }
+            }
+        
+        if( ! found ) {
+            ChangePosition p = { inX, inY, false, currentResponsiblePlayer,
+                                 0, 0, 0.0 };
+            mapChangePosSinceLastStep.push_back( p );
+            }
         }
     
     
@@ -2874,7 +3739,7 @@ static void dbPut( int inX, int inY, int inSlot, int inValue,
             apocalypseLocation.y = inY;
             }
         }
-    else if( inValue > 0 && inSlot == 0 && inSubCont == 0  ) {
+    if( inValue > 0 && inSlot == 0 && inSubCont == 0  ) {
         
         int status = getMonumentStatus( inValue );
         
@@ -2901,7 +3766,6 @@ static void dbPut( int inX, int inY, int inSlot, int inValue,
     DB_put( &db, key, value );
 
     dbPutCached( inX, inY, inSlot, inSubCont, inValue );
-    dbLookTimePut( inX, inY, MAP_TIMESEC );
     }
 
 
@@ -2921,6 +3785,8 @@ static void dbTimePut( int inX, int inY, int inSlot, timeSec_t inTime,
             
     
     DB_put( &timeDB, key, value );
+
+    dbTimePutCached( inX, inY, inSlot, inSubCont, inTime );
     }
 
 
@@ -2928,24 +3794,28 @@ static void dbTimePut( int inX, int inY, int inSlot, timeSec_t inTime,
 
 static void dbFloorPut( int inX, int inY, int inValue ) {
     
-    char found = false;
-    for( int i=0; i<mapChangePosSinceLastStep.size(); i++ ) {
+
+    if( ! skipTrackingMapChanges ) {
         
-        ChangePosition *p = mapChangePosSinceLastStep.getElement( i );
-        
-        if( p->x == inX && p->y == inY ) {
-            found = true;
+        char found = false;
+        for( int i=0; i<mapChangePosSinceLastStep.size(); i++ ) {
             
-            // update it
-            p->responsiblePlayerID = currentResponsiblePlayer;
-            break;
+            ChangePosition *p = mapChangePosSinceLastStep.getElement( i );
+            
+            if( p->x == inX && p->y == inY ) {
+                found = true;
+                
+                // update it
+                p->responsiblePlayerID = currentResponsiblePlayer;
+                break;
+                }
             }
-        }
         
-    if( ! found ) {
-        ChangePosition p = { inX, inY, false, currentResponsiblePlayer,
-                             0, 0, 0.0 };
-        mapChangePosSinceLastStep.push_back( p );
+        if( ! found ) {
+            ChangePosition p = { inX, inY, false, currentResponsiblePlayer,
+                                 0, 0, 0.0 };
+            mapChangePosSinceLastStep.push_back( p );
+            }
         }
     
     
@@ -2958,7 +3828,6 @@ static void dbFloorPut( int inX, int inY, int inValue ) {
             
     
     DB_put( &floorDB, key, value );
-    dbLookTimePut( inX, inY, MAP_TIMESEC );
     }
 
 
@@ -2986,7 +3855,7 @@ void dbLookTimePut( int inX, int inY, timeSec_t inTime ) {
     unsigned char value[8];
     
 
-    intPairToKey( inX, inY, key );
+    intPairToKey( inX/100, inY/100, key );
     timeToValue( inTime, value );
             
     
@@ -2995,12 +3864,25 @@ void dbLookTimePut( int inX, int inY, timeSec_t inTime ) {
 
 
 
+// certain types of movement transitions should always be live
+// tracked, even when out of view (NSEW moves, for human-made traveling objects
+// for example)
+static char isDecayTransAlwaysLiveTracked( TransRecord *inTrans ) {
+    if( inTrans != NULL &&
+        inTrans->move >=4 && inTrans->move <= 7 ) {
+
+        return true;
+        }
+
+    return false;
+    }
 
 
 
 // slot is 0 for main map cell, or higher for container slots
 static void trackETA( int inX, int inY, int inSlot, timeSec_t inETA,
-                      int inSubCont = 0 ) {
+                      int inSubCont = 0, 
+                      TransRecord *inApplicableTrans = NULL ) {
     
     timeSec_t timeLeft = inETA - MAP_TIMESEC;
         
@@ -3011,7 +3893,8 @@ static void trackETA( int inX, int inY, int inSlot, timeSec_t inETA,
         // we'll deal with them when they ripen
         // (we check the true ETA stored in map before acting
         //   on one stored in this queue)
-        LiveDecayRecord r = { inX, inY, inSlot, inETA, inSubCont };
+        LiveDecayRecord r = { inX, inY, inSlot, inETA, inSubCont, 
+                              inApplicableTrans };
             
         char exists;
         timeSec_t existingETA =
@@ -3037,6 +3920,29 @@ static void trackETA( int inX, int inY, int inSlot, timeSec_t inETA,
                 liveDecayRecordLastLookTimeHashTable.insert( inX, inY, inSlot,
                                                              inSubCont,
                                                              MAP_TIMESEC );
+                if( inSlot > 0 || inSubCont > 0 ) {
+                    
+                    ContRecord *oldCount = 
+                        liveDecayRecordLastLookTimeMaxContainedHashTable.
+                        lookupPointer( inX, inY, 0, 0 );
+                    
+                    if( oldCount != NULL ) {
+                        // update if needed
+                        if( oldCount->maxSlots < inSlot ) {
+                            oldCount->maxSlots = inSlot;
+                            }
+                        if( oldCount->maxSubSlots < inSubCont ) {
+                            oldCount->maxSubSlots = inSubCont;
+                            }
+                        }
+                    else {
+                        // insert new
+                        ContRecord r = { inSlot, inSubCont };
+                        
+                        liveDecayRecordLastLookTimeMaxContainedHashTable.
+                            insert( inX, inY, 0, 0, r );
+                        }
+                    }
                 }
             }
         }
@@ -3158,12 +4064,10 @@ int *getContained( int inX, int inY, int *outNumContained, int inSubCont ) {
     timeSec_t currentTime = MAP_TIMESEC;
     
     for( int i=0; i<*outNumContained; i++ ) {
-        char found;
         timeSec_t *oldLookTime =
             liveDecayRecordLastLookTimeHashTable.lookupPointer( inX, inY,
                                                                 i + 1,
-                                                                inSubCont,
-                                                                &found );
+                                                                inSubCont );
         if( oldLookTime != NULL ) {
             // look at it now
             *oldLookTime = currentTime;
@@ -3225,6 +4129,10 @@ timeSec_t *getContainedEtaDecay( int inX, int inY, int *outNumContained,
 
 
 int checkDecayObject( int inX, int inY, int inID ) {
+    if( inID == 0 ) {
+        return inID;
+        }
+    
     TransRecord *t = getPTrans( -1, inID );
 
     if( t == NULL ) {
@@ -3285,10 +4193,11 @@ int checkDecayObject( int inX, int inY, int inID ) {
                     
                     GridPos p = getClosestPlayerPos( inX, inY );
                     
-                    double dist = 
-                        sqrt( ( p.x - inX ) * ( p.x - inX ) + 
-                              ( p.y - inY ) * ( p.y - inY ) );
+                    double dX = (double)p.x - (double)inX;
+                    double dY = (double)p.y - (double)inY;
 
+                    double dist = sqrt( dX + dY );
+                    
                     if( dist <= 7 &&
                         ( p.x != 0 || p.y != 0 ) ) {
                         
@@ -3298,8 +4207,8 @@ int checkDecayObject( int inX, int inY, int inID ) {
                             desiredMoveDist = lrint( dist );
                             }
 
-                        dir.x = p.x - inX;
-                        dir.y = p.y - inY;
+                        dir.x = dX;
+                        dir.y = dY;
                         dir = normalize( dir );
                         
                         // round to one of 8 cardinal directions
@@ -3392,6 +4301,12 @@ int checkDecayObject( int inX, int inY, int inID ) {
                 
                 int tryRadius = 4;
 
+                if( t->move > 3 && tryDist == 1 ) {
+                    // single-step NSEW moves never go beyond 
+                    // their intended distance
+                    tryRadius = 0;
+                    }
+
                 // try again and again with smaller distances until we
                 // find an empty spot
                 while( newX == inX && newY == inY && tryDist > 0 ) {
@@ -3399,7 +4314,7 @@ int checkDecayObject( int inX, int inY, int inID ) {
                     // walk up to 4 steps past our dist in that direction,
                     // looking for non-blocking objects or an empty spot
                 
-                    for( int i=0; i<tryDist + tryRadius; i++ ) {
+                    for( int i=1; i<=tryDist + tryRadius; i++ ) {
                         int testX = lrint( inX + dir.x * i );
                         int testY = lrint( inY + dir.y * i );
                     
@@ -3418,11 +4333,25 @@ int checkDecayObject( int inX, int inY, int inID ) {
                                 trans = getPTrans( newID, oID );
                                 }
                             }
-                        
+                        else if( oID == 0 ) {
+                            // check for bare ground trans
+                            trans = getPTrans( inID, -1 );
+                            
+                            if( trans == NULL ) {
+                                // does trans exist for newID applied to
+                                // bare ground
+                                trans = getPTrans( newID, -1 );
+                                }
+                            }
+                            
+
+
                         if( i >= tryDist && oID == 0 ) {
-                            // found a spot for it to move
+                            // found a bare ground spot for it to move
                             newX = testX;
                             newY = testY;
+                            // keep any bare ground transition (or NULL)
+                            destTrans = trans;
                             break;
                             }
                         else if( i >= tryDist && trans != NULL ) {
@@ -3440,9 +4369,12 @@ int checkDecayObject( int inX, int inY, int inID ) {
                         }
                     
                     tryDist--;
-                    // 4 on first try, but then 1 on remaining tries to
-                    // avoid overlap with previous tries
-                    tryRadius = 1;
+                    
+                    if( tryRadius != 0 ) {
+                        // 4 on first try, but then 1 on remaining tries to
+                        // avoid overlap with previous tries
+                        tryRadius = 1;
+                        }
                     }
                 
                 
@@ -3457,6 +4389,12 @@ int checkDecayObject( int inX, int inY, int inID ) {
                             // block move
                             newX = inX;
                             newY = inY;
+                            
+                            // forget about trans that we found above
+                            // it crosses biome boundary
+                            // (and this fixes the infamous sliding
+                            //  penguin ice-hole bug)
+                            destTrans = NULL;
                             }
                         }
                     }
@@ -3598,7 +4536,8 @@ int checkDecayObject( int inX, int inY, int inID ) {
                         
 
                         
-                        TransRecord *leftDecayT = getTrans( -1, leftBehindID );
+                        TransRecord *leftDecayT = 
+                            getMetaTrans( -1, leftBehindID );
 
                         double leftMapETA = 0;
                         
@@ -3711,6 +4650,42 @@ int checkDecayObject( int inX, int inY, int inID ) {
                             }
                         }
                     }
+                else {
+                    // failed to find a spot to move
+
+                    // default to applying bare-ground transition, if any
+                    TransRecord *trans = getPTrans( inID, -1 );
+                            
+                    if( trans == NULL ) {
+                        // does trans exist for newID applied to
+                        // bare ground
+                        trans = getPTrans( newID, -1 );
+                        }
+                    if( trans != NULL ) {
+                        newID = trans->newTarget;
+                        
+                        // what was SUPPOSED to be left behind on ground
+                        // that object moved away from?
+                        if( trans->newActor > 0 ) {
+                            
+                            // see if there's anything defined for when
+                            // the new object moves ONTO this thing
+                            
+                            // (object is standing still in same spot, 
+                            //  effectively on top of what it was supposed
+                            //  to leave behind)
+                            
+                            TransRecord *inPlaceTrans = 
+                                getPTrans( newID, trans->newActor );
+                            
+                            if( inPlaceTrans != NULL &&
+                                inPlaceTrans->newTarget > 0 ) {
+                                
+                                newID = inPlaceTrans->newTarget;
+                                }
+                            }
+                        }
+                    }
                 }
             
                 
@@ -3722,7 +4697,7 @@ int checkDecayObject( int inX, int inY, int inID ) {
                 }
             
                 
-            TransRecord *newDecayT = getTrans( -1, newID );
+            TransRecord *newDecayT = getMetaTrans( -1, newID );
 
             if( newDecayT != NULL ) {
 
@@ -3771,7 +4746,7 @@ int checkDecayObject( int inX, int inY, int inID ) {
                     }
                 }            
 
-            setEtaDecay( newX, newY, mapETA );
+            setEtaDecay( newX, newY, mapETA, newDecayT );
             }
 
         }
@@ -3887,7 +4862,7 @@ void checkDecayContained( int inX, int inY, int inSubCont ) {
     
                 if( newID != 0 ) {
                     
-                    TransRecord *newDecayT = getTrans( -1, newID );
+                    TransRecord *newDecayT = getMetaTrans( -1, newID );
 
                     if( newDecayT != NULL ) {
                         
@@ -4048,51 +5023,42 @@ void lookAtRegion( int inXStart, int inYStart, int inXEnd, int inYEnd ) {
     for( int y=inYStart; y<=inYEnd; y++ ) {
         for( int x=inXStart; x<=inXEnd; x++ ) {
         
-            char found;
             timeSec_t *oldLookTime = 
                 liveDecayRecordLastLookTimeHashTable.lookupPointer( x, y, 
-                                                                    0, 0,
-                                                                    &found );
+                                                                    0, 0 );
     
             if( oldLookTime != NULL ) {
                 // we're tracking decay for this cell
                 *oldLookTime = currentTime;
                 }
 
-            int numContained;
+            ContRecord *contRec = 
+                liveDecayRecordLastLookTimeMaxContainedHashTable.
+                lookupPointer( x, y, 0, 0 );
             
-            int *contained = getContained( x, y, &numContained );
+            if( contRec != NULL ) {
 
-            for( int c=0; c<numContained; c++ ) {
+                for( int c=1; c<= contRec->maxSlots; c++ ) {
                 
-                char found;
-                oldLookTime =
-                    liveDecayRecordLastLookTimeHashTable.lookupPointer( 
-                        x, y, c + 1, 0, &found );
-                if( oldLookTime != NULL ) {
-                    // look at it now
-                    *oldLookTime = currentTime;
-                    }
-                
-                if( contained[c] < 0 ) {
-                    // sub contained
-                    int numSub = getNumContained( x, y, c + 1 );
-                    
-                    for( int s=0; s<numSub; s++ ) {
+                    oldLookTime =
+                        liveDecayRecordLastLookTimeHashTable.lookupPointer( 
+                            x, y, c, 0 );
+                    if( oldLookTime != NULL ) {
+                        // look at it now
+                        *oldLookTime = currentTime;
+                        }            
+
+                    for( int s=1; s<= contRec->maxSubSlots; s++ ) {
                         
                         oldLookTime =
                             liveDecayRecordLastLookTimeHashTable.lookupPointer( 
-                                x, y, s + 1, c+1, &found );
+                                x, y, c, s );
                         if( oldLookTime != NULL ) {
                             // look at it now
                             *oldLookTime = currentTime;
                             }
                         }
                     }
-                }
-            
-            if( contained != NULL ) {
-                delete [] contained;
                 }
             }
         }
@@ -4103,10 +5069,8 @@ void lookAtRegion( int inXStart, int inYStart, int inXEnd, int inYEnd ) {
 int getMapObject( int inX, int inY ) {
 
     // look at this map cell
-    char found;
     timeSec_t *oldLookTime = 
-        liveDecayRecordLastLookTimeHashTable.lookupPointer( inX, inY, 0, 0,
-                                                            &found );
+        liveDecayRecordLastLookTimeHashTable.lookupPointer( inX, inY, 0, 0 );
     
     timeSec_t curTime = MAP_TIMESEC;
 
@@ -4156,6 +5120,7 @@ int getMapBiome( int inX, int inY ) {
 // around x,y
 unsigned char *getChunkMessage( int inStartX, int inStartY, 
                                 int inWidth, int inHeight,
+                                GridPos inRelativeToPos,
                                 int *outMessageLength ) {
     
     int chunkCells = inWidth * inHeight;
@@ -4175,7 +5140,13 @@ unsigned char *getChunkMessage( int inStartX, int inStartY,
     int endY = inStartY + inHeight;
     int endX = inStartX + inWidth;
 
-    
+    timeSec_t curTime = MAP_TIMESEC;
+
+    // look at four corners of chunk whenever we fetch one
+    dbLookTimePut( inStartX, inStartY, curTime );
+    dbLookTimePut( inStartX, endY, curTime );
+    dbLookTimePut( endX, inStartY, curTime );
+    dbLookTimePut( endX, endY, curTime );
     
     for( int y=inStartY; y<endY; y++ ) {
         int chunkY = y - inStartY;
@@ -4204,8 +5175,12 @@ unsigned char *getChunkMessage( int inStartX, int inStartY,
             
 
             int numContained;
-            int *contained = getContained( x, y, &numContained );
+            int *contained = NULL;
 
+            if( chunk[cI] > 0 && getObject( chunk[cI] )->numSlots > 0 ) {
+                contained = getContained( x, y, &numContained );
+                }
+            
             if( contained != NULL ) {
                 containedStackSizes[cI] = numContained;
                 containedStacks[cI] = contained;
@@ -4254,15 +5229,17 @@ unsigned char *getChunkMessage( int inStartX, int inStartY,
         
 
         char *cell = autoSprintf( "%d:%d:%d", chunkBiomes[i],
-                                  chunkFloors[i], chunk[i] );
+                                  hideIDForClient( chunkFloors[i] ), 
+                                  hideIDForClient( chunk[i] ) );
         
         chunkDataBuffer.appendArray( (unsigned char*)cell, strlen(cell) );
         delete [] cell;
 
         if( containedStacks[i] != NULL ) {
             for( int c=0; c<containedStackSizes[i]; c++ ) {
-                char *containedString = autoSprintf( ",%d", 
-                                                     containedStacks[i][c] );
+                char *containedString = 
+                    autoSprintf( ",%d", 
+                                 hideIDForClient( containedStacks[i][c] ) );
         
                 chunkDataBuffer.appendArray( (unsigned char*)containedString, 
                                              strlen( containedString ) );
@@ -4274,7 +5251,8 @@ unsigned char *getChunkMessage( int inStartX, int inStartY,
                         
                         char *subContainedString = 
                             autoSprintf( ":%d", 
-                                         subContainedStacks[i][c][s] );
+                                         hideIDForClient( 
+                                             subContainedStacks[i][c][s] ) );
         
                         chunkDataBuffer.appendArray( 
                             (unsigned char*)subContainedString, 
@@ -4315,7 +5293,9 @@ unsigned char *getChunkMessage( int inStartX, int inStartY,
 
     char *header = autoSprintf( "MC\n%d %d %d %d\n%d %d\n#", 
                                 inWidth, inHeight,
-                                inStartX, inStartY, chunkDataBuffer.size(),
+                                inStartX - inRelativeToPos.x, 
+                                inStartY - inRelativeToPos.y, 
+                                chunkDataBuffer.size(),
                                 compressedSize );
     
     SimpleVector<unsigned char> buffer;
@@ -4343,17 +5323,374 @@ unsigned char *getChunkMessage( int inStartX, int inStartY,
 
 
 
+char isMapSpotBlocking( int inX, int inY ) {
+    
+    char cachedVal = blockingGetCached( inX, inY );
+    if( cachedVal != -1 ) {
+        
+        return cachedVal;
+        }
+
+
+    int target = getMapObject( inX, inY );
+
+    if( target != 0 ) {
+        ObjectRecord *obj = getObject( target );
+    
+        if( obj->blocksWalking ) {
+            // only cache direct hits
+            // wide objects that block are difficult to clear from cache
+            // when map cell changes
+            blockingPutCached( inX, inY, 1 );
+            return true;
+            }
+        }
+    
+    // not directly blocked
+    // need to check for wide objects to left and right
+    int maxR = getMaxWideRadius();
+    
+    for( int dx = -maxR; dx <= maxR; dx++ ) {
+        
+        if( dx != 0 ) {
+            
+            int nX = inX + dx;
+        
+            int nID = getMapObject( nX, inY );
+            
+            if( nID != 0 ) {
+                ObjectRecord *nO = getObject( nID );
+                
+                if( nO->wide ) {
+                    
+                    int dist;
+                    int minDist;
+                    
+                    if( dx < 0 ) {
+                        dist = -dx;
+                        minDist = nO->rightBlockingRadius;
+                        }
+                    else {
+                        dist = dx;
+                        minDist = nO->leftBlockingRadius;
+                        }
+                    
+                    if( dist <= minDist ) {
+                        // don't cache results from wide objects
+                        return true;
+                        }
+                    }
+                }
+            }
+        }
+    
+    // cache non-blocking results
+    blockingPutCached( inX, inY, 0 );
+    return false;
+    }
+
+
+
+
+
+static char equal( GridPos inA, GridPos inB ) {
+    if( inA.x == inB.x && inA.y == inB.y ) {
+        return true;
+        }
+    return false;
+    }
+
+
+
+static char tooClose( GridPos inA, GridPos inB, int inMinComponentDistance ) {
+    double xDist = (double)inA.x - (double)inB.x;
+    if( xDist < 0 ) {
+        xDist = -xDist;
+        }
+    double yDist = (double)inA.y - (double)inB.y;
+    if( yDist < 0 ) {
+        yDist = -yDist;
+        }
+    
+    if( xDist < inMinComponentDistance &&
+        yDist < inMinComponentDistance ) {
+        return true;
+        }
+    return false;
+    }
+    
+
+
+
+static int findGridPos( SimpleVector<GridPos> *inList, GridPos inP ) {
+    for( int i=0; i<inList->size(); i++ ) {
+        GridPos q = inList->getElementDirect( i );
+        if( equal( inP, q ) ) {
+            return i;
+            }
+        }
+    return -1;
+    }
+
+
+
+void setMapObjectRaw( int inX, int inY, int inID ) {
+    dbPut( inX, inY, 0, inID );
+    
+
+    // global trigger and speech pipe stuff
+
+    if( inID <= 0 ) {
+        return;
+        }
+
+    ObjectRecord *o = getObject( inID );
+    
+    if( o == NULL ) {
+        return;
+        }
+
+
+
+    if( o->isFlightLanding ) {
+        GridPos p = { inX, inY };
+
+        char found = false;
+
+        for( int i=0; i<flightLandingPos.size(); i++ ) {
+            GridPos otherP = flightLandingPos.getElementDirect( i );
+            
+            if( equal( p, otherP ) ) {
+                
+                // make sure this other strip really still exists
+                int oID = getMapObject( otherP.x, otherP.y );
+            
+                if( oID <=0 ||
+                    ! getObject( oID )->isFlightLanding ) {
+                
+                    // not even a valid landing pos anymore
+                    flightLandingPos.deleteElement( i );
+                    i--;
+                    }
+                else {
+                    found = true;
+                    break;
+                    }
+                }
+            }
+        
+        if( !found ) {
+            flightLandingPos.push_back( p );
+            }
+        }
+    
+
+
+    if( o->speechPipeIn ) {
+        GridPos p = { inX, inY };
+        
+        int foundIndex = 
+            findGridPos( &( speechPipesIn[ o->speechPipeIndex ] ), p );
+        
+        if( foundIndex == -1 ) {
+            speechPipesIn[ o->speechPipeIndex ].push_back( p );
+            }        
+        }
+    else if( o->speechPipeOut ) {
+        GridPos p = { inX, inY };
+        
+        int foundIndex = 
+            findGridPos( &( speechPipesOut[ o->speechPipeIndex ] ), p );
+        
+        if( foundIndex == -1 ) {
+            speechPipesOut[ o->speechPipeIndex ].push_back( p );
+            }
+        }
+    else if( o->isGlobalTriggerOn ) {
+        GlobalTriggerState *s = globalTriggerStates.getElement(
+            o->globalTriggerIndex );
+        
+        GridPos p = { inX, inY };
+        
+        int foundIndex = findGridPos( &( s->triggerOnLocations ), p );
+        
+        if( foundIndex == -1 ) {
+            s->triggerOnLocations.push_back( p );
+            
+            if( s->triggerOnLocations.size() == 1 ) {
+                // just turned on globally
+
+                /// process all receivers
+                for( int i=0; i<s->receiverLocations.size(); i++ ) {
+                    GridPos q = s->receiverLocations.getElementDirect( i );
+
+                    int id = getMapObjectRaw( q.x, q.y );
+                    
+                    if( id <= 0 ) {
+                        // receiver no longer here
+                        s->receiverLocations.deleteElement( i );
+                        i--;
+                        continue;
+                        }
+
+                    ObjectRecord *oR = getObject( id );
+                    
+                    if( oR->isGlobalReceiver &&
+                        oR->globalTriggerIndex == o->globalTriggerIndex ) {
+                        // match
+                        
+                        int metaID = getMetaTriggerObject( 
+                            o->globalTriggerIndex );
+                        
+                        if( metaID > 0 ) {
+                            TransRecord *tR = getPTrans( metaID, id );
+                            
+                            if( tR != NULL ) {
+                                
+                                dbPut( q.x, q.y, 0, tR->newTarget );
+                            
+                                // save this to our "triggered" list
+                                int foundIndex = findGridPos(
+                                    &( s->triggeredLocations ), q );
+                                
+                                if( foundIndex != -1 ) {
+                                    // already exists
+                                    // replace
+                                    *( s->triggeredIDs.getElement( 
+                                           foundIndex ) ) =
+                                        tR->newTarget;
+                                    *( s->triggeredRevertIDs.getElement( 
+                                           foundIndex ) ) =
+                                        tR->target;
+                                    }
+                                else {
+                                    s->triggeredLocations.push_back( q );
+                                    s->triggeredIDs.push_back( tR->newTarget );
+                                    s->triggeredRevertIDs.push_back( 
+                                        tR->target );
+                                    }
+                                }
+                            }
+                        }
+                    // receiver no longer here
+                    // (either wasn't here anymore for other reasons,
+                    //  or we just changed it into its triggered state)
+                    // remove it
+                    s->receiverLocations.deleteElement( i );
+                    i--;
+                    }
+                }
+            }
+        }
+    else if( o->isGlobalTriggerOff ) {
+        GlobalTriggerState *s = globalTriggerStates.getElement(
+            o->globalTriggerIndex );
+        
+        GridPos p = { inX, inY };
+
+        int foundIndex = findGridPos( &( s->triggerOnLocations ), p );
+        
+        if( foundIndex != -1 ) {
+            s->triggerOnLocations.deleteElement( foundIndex );
+            
+            if( s->triggerOnLocations.size() == 0 ) {
+                // just turned off globally, no on triggers left on map
+
+                /// process all triggered elements back to off
+
+                for( int i=0; i<s->triggeredLocations.size(); i++ ) {
+                    GridPos q = s->triggeredLocations.getElementDirect( i );
+
+                    int curID = getMapObjectRaw( q.x, q.y );
+
+                    int triggeredID = s->triggeredIDs.getElementDirect( i );
+                    
+                    if( curID == triggeredID ) {
+                        // cell still in triggered state
+
+                        // revert it
+                        int revertID = 
+                            s->triggeredRevertIDs.getElementDirect( i );
+                        
+                        dbPut( q.x, q.y, 0, revertID );
+                        
+                        // no longer triggered, remove it
+                        s->triggeredLocations.deleteElement( i );
+                        s->triggeredIDs.deleteElement( i );
+                        s->triggeredRevertIDs.deleteElement( i );
+                        i--;
+                        
+                        // remember it as a reciever (it has gone back
+                        // to being a receiver again)
+                        s->receiverLocations.push_back( q );
+                        }
+                    }
+                }
+            }
+        }
+    else if( o->isGlobalReceiver ) {
+        GlobalTriggerState *s = globalTriggerStates.getElement(
+            o->globalTriggerIndex );
+        
+        GridPos p = { inX, inY };
+
+        int foundIndex = findGridPos( &( s->receiverLocations ), p );
+        
+        if( foundIndex == -1 ) {
+            s->receiverLocations.push_back( p );
+            }
+        
+        if( s->triggerOnLocations.size() > 0 ) {
+            // this receiver is currently triggered
+            
+            // trigger it now, right away, as soon as it is placed on map
+                                    
+            int metaID = getMetaTriggerObject( o->globalTriggerIndex );
+                        
+            if( metaID > 0 ) {
+                TransRecord *tR = getPTrans( metaID, inID );
+
+                if( tR != NULL ) {
+                    
+                    dbPut( inX, inY, 0, tR->newTarget );
+                        
+                    GridPos q = { inX, inY };
+                                  
+    
+                    // save this to our "triggered" list
+                    int foundIndex = findGridPos( 
+                        &( s->triggeredLocations ), q );
+                    
+                    if( foundIndex != -1 ) {
+                        // already exists
+                        // replace
+                        *( s->triggeredIDs.getElement( foundIndex ) ) =
+                            tR->newTarget;
+                        *( s->triggeredRevertIDs.getElement( 
+                               foundIndex ) ) =
+                            tR->target;
+                        }
+                    else {
+                        s->triggeredLocations.push_back( q );
+                        s->triggeredIDs.push_back( tR->newTarget );
+                        s->triggeredRevertIDs.push_back( tR->target );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
 
 
 void setMapObject( int inX, int inY, int inID ) {
-    dbPut( inX, inY, 0, inID );
+    setMapObjectRaw( inX, inY, inID );
 
 
     // actually need to set decay here
     // otherwise, if we wait until getObject, it will assume that
     // this is a never-before-seen object and randomize the decay.
-    TransRecord *newDecayT = getTrans( -1, inID );
+    TransRecord *newDecayT = getMetaTrans( -1, inID );
     
     timeSec_t mapETA = 0;
     
@@ -4421,10 +5758,11 @@ void setMapObject( int inX, int inY, int inID ) {
 
 
 
-void setEtaDecay( int inX, int inY, timeSec_t inAbsoluteTimeInSeconds ) {
+void setEtaDecay( int inX, int inY, timeSec_t inAbsoluteTimeInSeconds,
+                  TransRecord *inApplicableTrans ) {
     dbTimePut( inX, inY, DECAY_SLOT, inAbsoluteTimeInSeconds );
     if( inAbsoluteTimeInSeconds != 0 ) {
-        trackETA( inX, inY, 0, inAbsoluteTimeInSeconds );
+        trackETA( inX, inY, 0, inAbsoluteTimeInSeconds, 0, inApplicableTrans );
         }
     }
 
@@ -4543,7 +5881,7 @@ void setContained( int inX, int inY, int inNumContained, int *inContained,
                    int inSubCont ) {
     dbPut( inX, inY, NUM_CONT_SLOT, inNumContained, inSubCont );
     for( int i=0; i<inNumContained; i++ ) {
-        dbPut( inX, inY, FIRST_CONT_SLOT + i, inContained[i], inSubCont );
+        changeContained( inX, inY, i, inSubCont, inContained[i] );
         }
     }
 
@@ -4719,12 +6057,18 @@ void clearAllContained( int inX, int inY, int inSubCont ) {
 
 
 
+
+#include "spiral.h"
+
+
 void shrinkContainer( int inX, int inY, int inNumNewSlots, int inSubCont ) {
     int oldNum = getNumContained( inX, inY, inSubCont );
     
     if( oldNum > inNumNewSlots ) {
         
         // first, scatter extra contents into empty nearby spots.
+        int nextSprialIndex = 1;
+        
         for( int i=inNumNewSlots; i<oldNum; i++ ) {
             
             int contID = getContained( inX, inY, i, inSubCont );
@@ -4738,25 +6082,18 @@ void shrinkContainer( int inX, int inY, int inNumNewSlots, int inSubCont ) {
             
             int emptyX, emptyY;
             char foundEmpty = false;
-
-            int r = 1;
             
-            while( !foundEmpty && r < 3 ) {    
-                for( int y = inY - r; y <= inY + r; y++ ) {
-                    for( int x = inX - r; x <= inX + r; x++ ) {
-                        
-                        if( getMapObjectRaw( x, y ) == 0 ) {
-                            emptyX = x;
-                            emptyY = y;
-                            foundEmpty = true;
-                            break;
-                            }
-                        }
-                    if( foundEmpty ) {
-                        break;
-                        }
+            GridPos center = { inX, inY };
+
+            while( !foundEmpty ) {
+                GridPos sprialPoint = getSpriralPoint( center, 
+                                                       nextSprialIndex );
+                if( getMapObjectRaw( sprialPoint.x, sprialPoint.y ) == 0 ) {
+                    emptyX = sprialPoint.x;
+                    emptyY = sprialPoint.y;
+                    foundEmpty = true;
                     }
-                r++;
+                nextSprialIndex ++;
                 }
             
             if( foundEmpty ) {
@@ -4792,22 +6129,30 @@ void shrinkContainer( int inX, int inY, int inNumNewSlots, int inSubCont ) {
 
 
 
-char *getMapChangeLineString( ChangePosition inPos ) {
-    
+MapChangeRecord getMapChangeRecord( ChangePosition inPos ) {
 
+    MapChangeRecord r;
+    r.absoluteX = inPos.x;
+    r.absoluteY = inPos.y;
+    r.oldCoordsUsed = false;
+
+    // compose format string
     SimpleVector<char> buffer;
     
 
-    char *header = autoSprintf( "%d %d %d ", inPos.x, inPos.y,
-                                getMapFloor( inPos.x, inPos.y ) );
+    char *header = autoSprintf( "%%d %%d %d ", 
+                                hideIDForClient( 
+                                    getMapFloor( inPos.x, inPos.y ) ) );
     
     buffer.appendElementString( header );
     
     delete [] header;
     
 
-    char *idString = autoSprintf( "%d", getMapObjectNoLook( inPos.x,
-                                                            inPos.y ) );
+    char *idString = autoSprintf( "%d", 
+                                  hideIDForClient( 
+                                      getMapObjectNoLook( 
+                                          inPos.x, inPos.y ) ) );
     
     buffer.appendElementString( idString );
     
@@ -4827,7 +6172,7 @@ char *getMapChangeLineString( ChangePosition inPos ) {
             
             }
         
-        char *idString = autoSprintf( ",%d", contained[i] );
+        char *idString = autoSprintf( ",%d", hideIDForClient( contained[i] ) );
         
         buffer.appendElementString( idString );
         
@@ -4840,7 +6185,9 @@ char *getMapChangeLineString( ChangePosition inPos ) {
                                                     &numSubContained,
                                                     i + 1 );
             for( int s=0; s<numSubContained; s++ ) {
-                idString = autoSprintf( ":%d", subContained[s] );
+
+                idString = autoSprintf( ":%d", 
+                                        hideIDForClient( subContained[s] ) );
         
                 buffer.appendElementString( idString );
         
@@ -4866,8 +6213,12 @@ char *getMapChangeLineString( ChangePosition inPos ) {
 
     
     if( inPos.speed > 0 ) {
-        char *moveString = autoSprintf( " %d %d %f", 
-                                        inPos.oldX, inPos.oldY, inPos.speed );
+        r.absoluteOldX = inPos.oldX;
+        r.absoluteOldY = inPos.oldY;
+        r.oldCoordsUsed = true;
+
+        char *moveString = autoSprintf( " %%d %%d %f", 
+                                        inPos.speed );
         
         buffer.appendElementString( moveString );
     
@@ -4876,7 +6227,47 @@ char *getMapChangeLineString( ChangePosition inPos ) {
 
     buffer.appendElementString( "\n" );
 
-    return buffer.getElementString();
+    r.formatString = buffer.getElementString();
+
+    return r;
+    }
+
+
+
+
+
+char *getMapChangeLineString( ChangePosition inPos ) {
+    MapChangeRecord r = getMapChangeRecord( inPos );
+
+    char *lineString = getMapChangeLineString( &r, 0, 0 );
+    
+    delete [] r.formatString;
+    
+    return lineString;
+    }
+
+
+
+
+char *getMapChangeLineString( MapChangeRecord *inRecord,
+                              int inRelativeToX, int inRelativeToY ) {
+    
+    char *lineString;
+    
+    if( inRecord->oldCoordsUsed ) {
+        lineString = autoSprintf( inRecord->formatString, 
+                                  inRecord->absoluteX - inRelativeToX, 
+                                  inRecord->absoluteY - inRelativeToY,
+                                  inRecord->absoluteOldX - inRelativeToX, 
+                                  inRecord->absoluteOldY - inRelativeToY );
+        }
+    else {
+        lineString = autoSprintf( inRecord->formatString, 
+                                  inRecord->absoluteX - inRelativeToX, 
+                                  inRecord->absoluteY - inRelativeToY );
+        }
+    
+    return lineString;
     }
 
 
@@ -4932,7 +6323,7 @@ void setMapFloor( int inX, int inY, int inID ) {
 
 
     // further decay from here
-    TransRecord *newT = getTrans( -1, inID );
+    TransRecord *newT = getMetaTrans( -1, inID );
 
     timeSec_t newEta = 0;
 
@@ -4979,7 +6370,53 @@ int getNextDecayDelta() {
 
 
 
-void stepMap( SimpleVector<char> *inMapChanges, 
+static void cleanMaxContainedHashTable( int inX, int inY ) {
+    
+    ContRecord *oldCount = 
+        liveDecayRecordLastLookTimeMaxContainedHashTable.
+        lookupPointer( inX, inY, 0, 0 );
+                
+    if( oldCount != NULL ) {
+    
+        int maxFoundSlot = 0;
+        int maxFoundSubSlot = 0;
+        
+        for( int c=1; c<= oldCount->maxSlots; c++ ) {
+
+            for( int s=0; s<= oldCount->maxSubSlots; s++ ) {
+                timeSec_t *val =
+                    liveDecayRecordLastLookTimeHashTable.lookupPointer(
+                        inX, inY, c, s );
+                
+                if( val != NULL ) {
+                    maxFoundSlot = c;
+                    maxFoundSubSlot = s;
+                    }
+                }
+            }
+        
+
+        if( maxFoundSlot == 0 && maxFoundSubSlot == 0 ) {
+            liveDecayRecordLastLookTimeMaxContainedHashTable.
+                remove( inX, inY, 0, 0 );
+            }
+        else {
+            if( maxFoundSlot < oldCount->maxSlots ) {
+                oldCount->maxSlots = maxFoundSlot;
+                }
+            if( maxFoundSubSlot < oldCount->maxSubSlots ) {
+                oldCount->maxSubSlots = maxFoundSubSlot;
+                }            
+            }
+        
+        
+        }
+    }
+
+
+
+
+void stepMap( SimpleVector<MapChangeRecord> *inMapChanges, 
               SimpleVector<ChangePosition> *inChangePosList ) {
     
     timeSec_t curTime = MAP_TIMESEC;
@@ -5011,12 +6448,18 @@ void stepMap( SimpleVector<char> *inMapChanges,
             if( storedFound ) {
 
                 if( MAP_TIMESEC - lastLookTime > 
-                    maxSecondsNoLookDecayTracking ) {
+                    maxSecondsNoLookDecayTracking 
+                    &&
+                    ! isDecayTransAlwaysLiveTracked( r.applicableTrans ) ) {
                     
                     // this cell or slot hasn't been looked at in too long
+                    // AND it's not a trans that's live tracked even when
+                    // not watched
+
                     // don't even apply this decay now
                     liveDecayRecordLastLookTimeHashTable.remove( 
                         r.x, r.y, r.slot, r.subCont );
+                    cleanMaxContainedHashTable( r.x, r.y );
                     continue;
                     }
                 // else keep lastlook time around in case
@@ -5054,6 +6497,8 @@ void stepMap( SimpleVector<char> *inMapChanges,
             // forget last look time
             liveDecayRecordLastLookTimeHashTable.remove( 
                 r.x, r.y, r.slot, r.subCont );
+            
+            cleanMaxContainedHashTable( r.x, r.y );
             }
         }
     
@@ -5075,9 +6520,8 @@ void stepMap( SimpleVector<char> *inMapChanges,
         
         inChangePosList->push_back( p );
         
-        char *changeString = getMapChangeLineString( p );
-        inMapChanges->appendElementString( changeString );
-        delete [] changeString;
+        MapChangeRecord changeRecord = getMapChangeRecord( p );
+        inMapChanges->push_back( changeRecord );
         }
 
     
@@ -5228,7 +6672,8 @@ doublePair computeRecentCampAve( int *outNumPosFound ) {
 
 
 
-void getEvePosition( char *inEmail, int *outX, int *outY ) {
+void getEvePosition( const char *inEmail, int *outX, int *outY, 
+                     char inAllowRespawn ) {
 
     int currentEveRadius = eveRadius;
 
@@ -5243,7 +6688,7 @@ void getEvePosition( char *inEmail, int *outX, int *outY ) {
     
     int result = eveDBGet( inEmail, &pX, &pY, &pR );
     
-    if( result == 1 && pR > 0 ) {
+    if( inAllowRespawn && result == 1 && pR > 0 ) {
         printf( "Found camp center (%d,%d) r=%d in db for %s\n",
                 pX, pY, pR, inEmail );
         
@@ -5253,11 +6698,14 @@ void getEvePosition( char *inEmail, int *outX, int *outY ) {
         }
     else {
         // player has never been an Eve that survived to old age before
-        
+        // or such repawning forbidden by caller
 
         // New method:
         GridPos eveLocToUse = eveLocation;
         
+        maxEveLocationUsage = 
+            SettingsManager::getIntSetting( "maxEveStartupLocationUsage", 10 );
+
         if( eveLocationUsage < maxEveLocationUsage ) {
             eveLocationUsage++;
             // keep using same location
@@ -5266,6 +6714,19 @@ void getEvePosition( char *inEmail, int *outX, int *outY ) {
             // post-startup eve location has been used too many times
             // place eves on spiral instead
 
+            if( abs( eveLocToUse.x ) > 100000 ||
+                abs( eveLocToUse.y ) > 100000 ) {
+                // we've gotten to far away from center over time
+                
+                // re-center spiral on center to rein things in
+
+                // we'll end up saving a position on the arm of this new
+                // centered spiral for future start-ups, so the eve
+                // location can move out from here
+                eveLocToUse.x = 0;
+                eveLocToUse.y = 0;
+                }
+            
             int jump = SettingsManager::getIntSetting( "nextEveJump", 2000 );
             
             // advance eve angle along spiral
@@ -5285,6 +6746,8 @@ void getEvePosition( char *inEmail, int *outX, int *outY ) {
             eveLocToUse.x += lrint( delta.x );
             eveLocToUse.y += lrint( delta.y );
             
+            
+
             // but do save it as a possible post-startup location for next time
             File eveLocFile( NULL, "lastEveLocation.txt" );
             char *locString = 
@@ -5367,7 +6830,7 @@ void getEvePosition( char *inEmail, int *outX, int *outY ) {
 
 
 
-void mapEveDeath( char *inEmail, double inAge ) {
+void mapEveDeath( const char *inEmail, double inAge, GridPos inDeathMapPos ) {
     
     // record exists?
 
@@ -5390,9 +6853,6 @@ void mapEveDeath( char *inEmail, double inAge ) {
         }
     
 
-    int num = 0;
-    
-    doublePair ave = computeRecentCampAve( &num );
     
     int result = eveDBGet( inEmail, &pX, &pY, &pR );
     
@@ -5413,25 +6873,13 @@ void mapEveDeath( char *inEmail, double inAge ) {
         // not found in DB
         
         // must overwrite no matter what
-        pX = lrint( ave.x );
-        pY = lrint( ave.y );
-
         pR = eveRadiusStart;
         }
-    
-    
-    if( num > 0 ) {
-        // overwrite middle from last life with new middle of placements
-        // from this life
-        pX = lrint( ave.x );
-        pY = lrint( ave.y );
-        }
-    else {
-        // otherwise, leave last life's average alone
-        printf( "Logging Eve death:   "
-                "Keeping camp average (%d,%d) from last life\n",
-                pX, pY );
-        }
+
+
+    // their next camp will start where they last died
+    pX = inDeathMapPos.x;
+    pY = inDeathMapPos.y;
     
 
     printf( "Remembering Eve's camp in database (%d,%d) r=%d for %s\n",
@@ -5443,4 +6891,300 @@ void mapEveDeath( char *inEmail, double inAge ) {
 
 
 
+static unsigned int nextLoadID = 0;
+
+
+char loadTutorialStart( TutorialLoadProgress *inTutorialLoad, 
+                        const char *inMapFileName, int inX, int inY ) {
+
+    // don't open file yet, because we don't want to have the same
+    // file open in parallel
+    
+    // save info to open file on first step, which is called one player at a 
+    // time
+    inTutorialLoad->uniqueLoadID = nextLoadID++;
+    inTutorialLoad->fileOpened = false;
+    inTutorialLoad->file = NULL;
+    inTutorialLoad->mapFileName = stringDuplicate( inMapFileName );
+    inTutorialLoad->x = inX;
+    inTutorialLoad->y = inY;
+    inTutorialLoad->startTime = Time::getCurrentTime();
+    inTutorialLoad->stepCount = 0;
+
+    return true;
+    }
+
+
+
+
+char loadTutorialStep( TutorialLoadProgress *inTutorialLoad,
+                       double inTimeLimitSec ) {
+
+    if( ! inTutorialLoad->fileOpened ) {
+        // first step, open file
+        
+        char returnVal = false;
+        
+        // only try opening it once
+        inTutorialLoad->fileOpened = true;
+        
+        File tutorialFolder( NULL, "tutorialMaps" );
+
+        if( tutorialFolder.exists() && tutorialFolder.isDirectory() ) {
+        
+            File *mapFile = tutorialFolder.getChildFile( 
+                inTutorialLoad->mapFileName );
+            
+            if( mapFile->exists() &&  ! mapFile->isDirectory() ) {
+                char *fileName = mapFile->getFullFileName();
+                
+                FILE *file = fopen( fileName, "r" );
+                
+                if( file != NULL ) {
+                    inTutorialLoad->file = file;
+                    
+                    returnVal = true;
+                    }
+                
+                delete [] fileName;
+                }
+            delete mapFile;
+            }
+        
+        delete [] inTutorialLoad->mapFileName;
+        
+        return returnVal;
+        }
+    
+
+    // else file already open
+
+    if( inTutorialLoad->file == NULL ) {
+        // none left
+        return false;
+        }
+
+    char moreLeft = loadIntoMapFromFile( inTutorialLoad->file, 
+                                         inTutorialLoad->x, inTutorialLoad->y,
+                                         inTimeLimitSec );
+
+    inTutorialLoad->stepCount++;
+    
+
+    if( ! moreLeft ) {
+        fclose( inTutorialLoad->file );
+        inTutorialLoad->file = NULL;
+        }
+    return moreLeft;
+    }
+
+
+
+
+
+
+
+
+char getMetadata( int inMapID, unsigned char *inBuffer ) {
+    int metaID = extractMetadataID( inMapID );
+    
+    if( metaID == 0 ) {
+        return false;
+        }
+
+    // look up in metadata DB
+    unsigned char key[4];    
+    intToValue( metaID, key );
+    int result = DB_get( &metaDB, key, inBuffer );
+
+    if( result == 0 ) {
+        return true;
+        }
+
+    return false;
+    }
+
+    
+
+
+// returns full map ID with embedded metadata ID for new metadata record
+int addMetadata( int inObjectID, unsigned char *inBuffer ) {
+    int metaID = getNewMetadataID();
+    
+    int mapID = packMetadataID( inObjectID, metaID );
+    
+    // insert into metadata DB
+    unsigned char key[4];    
+    intToValue( metaID, key );
+    DB_put( &metaDB, key, inBuffer );
+
+    
+    return mapID;
+    }
+
+
+
+
+static double distSquared( GridPos inA, GridPos inB ) {
+    double xDiff = (double)inA.x - (double)inB.x;
+    double yDiff = (double)inA.y - (double)inB.y;
+    
+    return xDiff * xDiff + yDiff * yDiff;
+    }
+
+
+
+
+void removeLandingPos( GridPos inPos ) {
+    for( int i=0; i<flightLandingPos.size(); i++ ) {
+        if( equal( inPos, flightLandingPos.getElementDirect( i ) ) ) {
+            flightLandingPos.deleteElement( i );
+            return;
+            }
+        }
+    }
+
+
+char isInDir( GridPos inPos, GridPos inOtherPos, doublePair inDir ) {
+    double dX = (double)inOtherPos.x - (double)inPos.x;
+    double dY = (double)inOtherPos.y - (double)inPos.y;
+    
+    if( inDir.x > 0 && dX > 0 ) {
+        return true;
+        }
+    if( inDir.x < 0 && dX < 0 ) {
+        return true;
+        }
+    if( inDir.y > 0 && dY > 0 ) {
+        return true;
+        }
+    if( inDir.y < 0 && dY < 0 ) {
+        return true;
+        }
+    return false;
+    }
+
+
+
+GridPos getNextCloseLandingPos( GridPos inCurPos, 
+                                doublePair inDir, 
+                                char *outFound ) {
+    
+    int closestIndex = -1;
+    GridPos closestPos;
+    double closestDist = DBL_MAX;
+    
+    for( int i=0; i<flightLandingPos.size(); i++ ) {
+        GridPos thisPos = flightLandingPos.getElementDirect( i );
+
+        if( tooClose( inCurPos, thisPos, 250 ) ) {
+            // don't consider landing at spots closer than 250,250 manhattan
+            // to takeoff spot
+            continue;
+            }
+
+        
+        if( isInDir( inCurPos, thisPos, inDir ) ) {
+            double dist = distSquared( inCurPos, thisPos );
+            
+            if( dist < closestDist ) {
+                // check if this is still a valid landing pos
+                int oID = getMapObject( thisPos.x, thisPos.y );
+                
+                if( oID <=0 ||
+                    ! getObject( oID )->isFlightLanding ) {
+                    
+                    // not even a valid landing pos anymore
+                    flightLandingPos.deleteElement( i );
+                    i--;
+                    continue;
+                    }
+                closestDist = dist;
+                closestPos = thisPos;
+                closestIndex = i;
+                }
+            }
+        }
+    
+    if( closestIndex == -1 ) {
+        *outFound = false;
+        }
+    else {
+        *outFound = true;
+        }
+    
+    return closestPos;
+    }
+
+                
+
+
+
+GridPos getNextFlightLandingPos( int inCurrentX, int inCurrentY, 
+                                 doublePair inDir ) {
+    int closestIndex = -1;
+    GridPos closestPos;
+    double closestDist = DBL_MAX;
+
+    GridPos curPos = { inCurrentX, inCurrentY };
+
+    for( int i=0; i<flightLandingPos.size(); i++ ) {
+        GridPos thisPos = flightLandingPos.getElementDirect( i );
+        
+        double dist = distSquared( curPos, thisPos );
+        
+        if( dist < closestDist ) {
+            
+            // check if this is still a valid landing pos
+            int oID = getMapObject( thisPos.x, thisPos.y );
+            
+            if( oID <=0 ||
+                ! getObject( oID )->isFlightLanding ) {
+                
+                // not even a valid landing pos anymore
+                flightLandingPos.deleteElement( i );
+                i--;
+                continue;
+                }
+            closestDist = dist;
+            closestPos = thisPos;
+            closestIndex = i;
+            }
+        }
+
+    
+    if( closestIndex != -1 && flightLandingPos.size() > 1 ) {
+        // found closest, and there's more than one
+        // look for next valid position in chosen direction
+
+        
+        char found = false;
+        
+        GridPos nextPos = getNextCloseLandingPos( curPos, inDir, &found );
+        
+        if( found ) {
+            return nextPos;
+            }
+
+        // if we got here, we never found a nextPos that was valid
+        // closestPos is only option
+        return closestPos;
+        }
+    else if( closestIndex != -1 && flightLandingPos.size() == 1 ) {
+        // land at closest, only option
+        return closestPos;
+        }
+    
+    // got here, no place to land
+
+    // crash them at next Eve location
+    
+    int eveX, eveY;
+    
+    getEvePosition( "dummyPlaneCrashEmail@test.com", &eveX, &eveY, false );
+    
+    GridPos returnVal = { eveX, eveY };
+    
+    return returnVal;
+    }
 

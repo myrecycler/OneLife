@@ -49,6 +49,13 @@ void freeSoundBank();
 void stepSoundBank();
 
 
+// returns NULL if asynchronous loading process hasn't failed
+// returns internally-allocated string (destroyed internally) if
+//    loading process fails.  String is name of file that failed to load
+char *getSoundBankLoadFailure();
+
+
+
 // music headroom is fraction of full volume reserved for music
 // sound effect volume will be scaled so that inMaxSimultaneousSoundEffects
 // can be played together without clipping (each SoundUsage can have its
@@ -88,6 +95,14 @@ void playSound( SoundUsage inUsage,
 // vector is in world tile units
 void playSound( SoundUsage inUsage,
                 doublePair inVectorFromCameraToSoundSource );
+
+
+// leverage stereo positioning code on a raw sound sprite
+// still offer a volume tweak on top of stereo positioning
+void playSound( SoundSpriteHandle inSoundSprite,
+                double inVolumeTweak,
+                doublePair inVectorFromCameraToSoundSource );
+
 
 
 

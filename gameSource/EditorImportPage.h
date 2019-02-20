@@ -126,6 +126,10 @@ class EditorImportPage : public GamePage, public ActionListener {
         
         TextButton mSaveSpriteButton;
         TextButton mSaveOverlayButton;
+        
+        TextButton mInvertButton;
+        char mInvertColors;
+        
 
         Picker mSpritePicker;
         Picker mOverlayPicker;
@@ -193,6 +197,8 @@ class EditorImportPage : public GamePage, public ActionListener {
         KeyLegend mOverlayKeyLegend;
         
         char mShowTagMessage;
+
+        char mAKeyDown;
     };
 
 

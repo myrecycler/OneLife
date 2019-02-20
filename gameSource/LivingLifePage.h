@@ -18,6 +18,7 @@
 #include "pathFind.h"
 
 #include "animationBank.h"
+#include "emotion.h"
 
 #include "TextField.h"
 
@@ -32,6 +33,7 @@
 
 #define NUM_HOME_ARROWS 8
 
+#define NUM_YUM_SLIPS 4
 
 
 typedef struct LiveObject {
@@ -54,10 +56,17 @@ typedef struct LiveObject {
         
         char outOfRange;
         char dying;
+        char sick;
         
         char *name;
 
         char *relationName;
+        
+        int curseLevel;
+        
+        int excessCursePoints;
+
+        int curseTokenCount;
         
 
         // roll back age temporarily to make baby revert to crying
@@ -77,6 +86,12 @@ typedef struct LiveObject {
         // by an adult
         int heldByAdultID;
         
+        // -1 if not set
+        // otherwise, ID of adult that is holding us according to pending
+        // messages, but not according to already-played messages
+        int heldByAdultPendingID;
+        
+
         // usually 0, unless we're being held by an adult
         // and just got put down
         // then we slide back into position
@@ -86,6 +101,15 @@ typedef struct LiveObject {
         char lastHeldByRawPosSet;
         doublePair lastHeldByRawPos;
         
+        // track this so that we only send one jump message even if
+        // the player clicks more than once before the server registers the
+        // jump
+        double jumpOutOfArmsSentTime;
+        
+        // true if locally-controlled baby is attempting to jump out of arms
+        char babyWiggle;
+        double babyWiggleProgress;
+
         
         // usually 0, but used to slide into and out of riding position
         doublePair ridingOffset;
@@ -150,6 +174,11 @@ typedef struct LiveObject {
         // stacks of items contained in each piece of clothing
         SimpleVector<int> clothingContained[ NUM_CLOTHING_PIECES ];
 
+        float clothingHighlightFades[ NUM_CLOTHING_PIECES ];
+        
+        int currentMouseOverClothingIndex;
+        
+
         // current fractional grid position and speed
         doublePair currentPos;
         // current speed is move delta per frame
@@ -171,6 +200,9 @@ typedef struct LiveObject {
         // destination grid position
         int xd;
         int yd;
+        
+        // true if xd,yd set based on a truncated PM from the server
+        char destTruncated;
         
         
         // use a waypoint along the way during pathfinding.
@@ -217,6 +249,8 @@ typedef struct LiveObject {
         
         char inMotion;
         
+        int lastMoveSequenceNumber;
+
         char displayChar;
         
         int actionTargetX;
@@ -231,7 +265,13 @@ typedef struct LiveObject {
 
         char pendingAction;
         float pendingActionAnimationProgress;
+        float pendingActionAnimationTotalProgress;
         double pendingActionAnimationStartTime;
+        
+        double lastActionSendStartTime;
+        // how long it took server to get back to us with a PU last
+        // time we sent an action.  Most recent round-trip time
+        double lastResponseTimeDelta;
         
         
         // NULL if no active speech
@@ -240,6 +280,8 @@ typedef struct LiveObject {
         // wall clock time when speech should start fading
         double speechFadeETATime;
 
+        char speechIsSuccessfulCurse;
+        
 
         char shouldDrawPathMarks;
         double pathMarkFade;
@@ -250,9 +292,22 @@ typedef struct LiveObject {
         SimpleVector<char*> pendingReceivedMessages;
         char somePendingMessageIsMoreMovement;
 
+
+        // NULL if none
+        Emotion *currentEmot;
+        // wall clock time when emot clears
+        double emotClearETATime;
+
     } LiveObject;
 
 
+
+
+typedef struct GraveInfo {
+        GridPos worldPos;
+        char *relationName;
+    } GraveInfo;
+        
 
 
 
@@ -345,7 +400,10 @@ class LivingLifePage : public GamePage {
         ~LivingLifePage();
         
         void clearMap();
-
+        
+        // enabled tutorail next time a connection loads
+        void runTutorial();
+        
 
         char isMapBeingPulled();
 
@@ -393,10 +451,14 @@ class LivingLifePage : public GamePage {
         
         int mRequiredVersion;
 
+        char mForceRunTutorial;
+        int mTutorialNumber;
+
         int mFirstServerMessagesReceived;
         
         char mStartedLoadingFirstObjectSet;
         char mDoneLoadingFirstObjectSet;
+        double mStartedLoadingFirstObjectSetStartTime;
 
         float mFirstObjectSetLoadingProgress;
         
@@ -434,7 +496,7 @@ class LivingLifePage : public GamePage {
         double *mMapAnimationLastFrameCount;
         
         double *mMapAnimationFrozenRotFrameCount;
-        
+        char *mMapAnimationFrozenRotFrameCountUsed;
 
         int *mMapFloorAnimationFrameCount;
 
@@ -518,6 +580,9 @@ class LivingLifePage : public GamePage {
         
         HomeArrow mHomeArrowStates[ NUM_HOME_ARROWS ];
         
+        SimpleVector<char*> mPreviousHomeDistStrings;
+        SimpleVector<float> mPreviousHomeDistFades;
+        
 
         // offset from current view center
         doublePair mNotePaperHideOffset;
@@ -544,6 +609,10 @@ class LivingLifePage : public GamePage {
         
         SoundSpriteHandle mHungerSound;
         char mPulseHungerSound;
+
+        SoundSpriteHandle mTutorialSound;
+        SoundSpriteHandle mCurseSound;
+
         
         SpriteHandle mHungerSlipSprites[3];
 
@@ -582,6 +651,8 @@ class LivingLifePage : public GamePage {
 
         int mLiveHintSheetIndex;
 
+        char mForceHintRefresh;
+        
         int mCurrentHintObjectID;
         int mCurrentHintIndex;
         
@@ -590,13 +661,38 @@ class LivingLifePage : public GamePage {
 
         SimpleVector<TransRecord *> mLastHintSortedList;
         int mLastHintSortedSourceID;
+        char *mLastHintFilterString;
         
+        // string that's waiting to be shown on hint-sheet 4
+        char *mPendingFilterString;
+        
+
         // table sized to number of possible objects
         int *mHintBookmarks;
         
 
         int getNumHints( int inObjectID );
         char *getHintMessage( int inObjectID, int inIndex );
+
+        char *mHintFilterString;
+        
+
+        
+        // offset from current view center
+        doublePair mTutorialHideOffset[NUM_HINT_SHEETS];
+        doublePair mTutorialPosOffset[NUM_HINT_SHEETS];
+        doublePair mTutorialTargetOffset[NUM_HINT_SHEETS];
+
+        doublePair mTutorialExtraOffset[NUM_HINT_SHEETS];
+
+        // # separates lines
+        const char *mTutorialMessage[NUM_HINT_SHEETS];
+
+        char mTutorialFlips[NUM_HINT_SHEETS];
+
+        int mLiveTutorialSheetIndex;
+        int mLiveTutorialTriggerNumber;
+
 
 
         // -1 if outside bounds of locally stored map
@@ -628,6 +724,19 @@ class LivingLifePage : public GamePage {
                                     char inSkipBar,
                                     char inSkipDashes );
         
+        
+        int mYumBonus;
+        SimpleVector<int> mOldYumBonus;
+        SimpleVector<float> mOldYumBonusFades;
+
+        int mYumMultiplier;
+
+        SpriteHandle mYumSlipSprites[ NUM_YUM_SLIPS ];
+        int mYumSlipNumberToShow[ NUM_YUM_SLIPS ];
+        doublePair mYumSlipHideOffset[ NUM_YUM_SLIPS ];
+        doublePair mYumSlipPosOffset[ NUM_YUM_SLIPS ];
+        doublePair mYumSlipPosTargetOffset[ NUM_YUM_SLIPS ];
+        
 
         // the object that we're mousing over
         int mLastMouseOverID;
@@ -636,6 +745,9 @@ class LivingLifePage : public GamePage {
         
         GridPos mCurMouseOverSpot;
         char mCurMouseOverBehind;
+
+        GridPos mCurMouseOverWorld;
+
         
         char mCurMouseOverPerson;
         char mCurMouseOverSelf;
@@ -682,6 +794,15 @@ class LivingLifePage : public GamePage {
         double mPageStartTime;
 
         void computePathToDest( LiveObject *inObject );
+        
+        double computePathSpeedMod( LiveObject *inObject, int inPathLength );
+        
+        // check if same floor is present when we take a step in x or y
+        char isSameFloor( int inFloor, GridPos inFloorPos, int inDX, int inDY );
+        
+        // forces next pointerDown call to avoid everything but ground clicks
+        char mForceGroundClick;
+        
 
 
         LiveObject *getOurLiveObject();
@@ -690,11 +811,12 @@ class LivingLifePage : public GamePage {
 
         void clearLiveObjects();
         
+        // inSpeaker can be NULL
         void drawChalkBackgroundString( doublePair inPos, 
                                         const char *inString,
                                         double inFade,
                                         double inMaxWidth,
-                                        LiveObject *inSpeaker,
+                                        LiveObject *inSpeaker = NULL,
                                         int inForceMinChalkBlots = -1 );
         
 
@@ -708,14 +830,16 @@ class LivingLifePage : public GamePage {
 
         void drawMapCell( int inMapI, 
                           int inScreenX, int inScreenY,
-                          char inHighlightOnly = false );
+                          char inHighlightOnly = false,
+                          // blocks frame update for cell and animation sounds
+                          char inNoTimeEffects = false );
         
         void checkForPointerHit( PointerHitRecord *inRecord,
                                  float inX, float inY );
         
 
 
-        void handleOurDeath();
+        void handleOurDeath( char inDisconnect = false );
         
 
         char *mDeathReason;
@@ -743,8 +867,23 @@ class LivingLifePage : public GamePage {
                               AnimType inType,
                               int inOldFrameCount, int inNewFrameCount,
                               double inPosX, double inPosY );
+        
+
+        SimpleVector<GraveInfo> mGraveInfo;
 
         
+
+        // end the move of an extra moving object and stick it back
+        // in the map at its destination.
+        // inExtraIndex is its index in the mMapExtraMovingObjects vectors
+        void endExtraObjectMove( int inExtraIndex );
+        
+
+        char mUsingSteam;
+        char mZKeyDown;
+
+        char mPlayerInFlight;
+
     };
 
 

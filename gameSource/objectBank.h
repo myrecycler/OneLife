@@ -6,12 +6,8 @@
 #include "minorGems/util/SimpleVector.h"
 
 
-typedef struct FloatRGB {
-        float r, g, b;
-    } FloatRGB;
+#include "FloatRGB.h"
 
-
-char equal( FloatRGB inA, FloatRGB inB );
 
 
 #include "SoundUsage.h"
@@ -39,6 +35,17 @@ typedef struct ObjectRecord {
         
         // can it not be picked up
         char permanent;
+
+        // true if this object should never be drawn flipped
+        // (objects that have text on them, for example)
+        // Note that some permanent objects are never drawn flipped 
+        // automatically (those that block walking or are drawn behind player)
+        char noFlip;
+        
+        // for objects that can only be accessed from the east and west
+        // (no actions triggered from north or south)
+        char sideAccess;
+        
 
         // age you have to be to to pick something up
         int minPickupAge;
@@ -71,7 +78,15 @@ typedef struct ObjectRecord {
         // wide objects have this set to true automatically
         char drawBehindPlayer;
         
+        // for individual sprite indices that are drawn behind
+        // when whole object is not drawn behind
+        char anySpritesBehindPlayer;
+        char *spriteBehindPlayer;
         
+        // toggle for additive blend mode (glow) for sprites
+        char *spriteAdditiveBlend;
+        
+
         // biome numbers where this object will naturally occur according
         // to mapChance below
         int numBiomes;
@@ -163,6 +178,10 @@ typedef struct ObjectRecord {
         // decay-caused creation).
         char creationSoundInitialOnly;
         
+        // true if creation sound should always play, even if other
+        // same-trigger sounds are playing
+        char creationSoundForce;
+        
 
         // if it is a container, how many slots?
         // 0 if not a container
@@ -233,7 +252,22 @@ typedef struct ObjectRecord {
         char *spriteIsBody;
         char *spriteIsBackFoot;
         char *spriteIsFrontFoot;
+
+
+        // derrived automatically for person objects from sprite name
+        // tags (if they contain Eyes or Mouth)
+        // only filled in if sprite bank has been loaded before object bank
+        char *spriteIsEyes;
+        char *spriteIsMouth;
         
+        // offset of eyes from head in main segment of life
+        // derrived automatically from whatever eyes are visible at age 30
+        // (old eyes may have wrinkles around them, so they end up
+        //  getting centered differently)
+        // only filled in if sprite bank has been loaded before object bank
+        doublePair mainEyesOffset;
+        
+
         
         // number of times this object can be used before
         // something different happens
@@ -287,7 +321,31 @@ typedef struct ObjectRecord {
         int *variableDummyIDs;
         
         char isVariableDummy;
+        int variableDummyParent;
 
+        char isVariableHidden;
+
+
+        // flags derived from various &flags in object description
+        char written;
+        char writable;
+
+        char mayHaveMetadata;
+        
+        
+        char isGlobalTriggerOn;
+        char isGlobalTriggerOff;
+        char isGlobalReceiver;
+        // index into globalTriggers vector
+        int globalTriggerIndex;
+        
+
+        char speechPipeIn;
+        char speechPipeOut;
+        int speechPipeIndex;
+
+        char isFlying;
+        char isFlightLanding;
 
     } ObjectRecord;
 
@@ -390,12 +448,16 @@ int addObject( const char *inDescription,
                float inContainSize,
                double inVertContainRotationOffset,
                char inPermanent,
+               char inNoFlip,
+               char inSideAccess,
                int inMinPickupAge,
                char inHeldInHand,
                char inRideable,
                char inBlocksWalking,
                int inLeftBlockingRadius, int inRightBlockingRadius,
                char inDrawBehindPlayer,
+               char *inSpriteBehindPlayer,
+               char *inSpriteAdditiveBlend,
                char *inBiomes,
                float inMapChance,
                int inHeatValue,
@@ -420,6 +482,7 @@ int addObject( const char *inDescription,
                SoundUsage inEatingSound,
                SoundUsage inDecaySound,
                char inCreationSoundInitialOnly,
+               char inCreationSoundForce,
                int inNumSlots, float inSlotSize, doublePair *inSlotPos,
                char *inSlotVert,
                int *inSlotParent,
@@ -535,6 +598,9 @@ int getRandomFemalePersonObject();
 int *getRaces( int *outNumRaces );
 
 
+// number of people in race
+int getRaceSize( int inRace );
+
 // -1 if no person of this race exists
 int getRandomPersonObjectOfRace( int inRace );
 
@@ -550,6 +616,11 @@ int getPrevPersonObject( int inCurrentPersonObjectID );
 
 // -1 if no death marker object exists
 int getRandomDeathMarker();
+
+
+// NOT destroyed or modified by caller
+SimpleVector<int> *getAllPossibleDeathIDs();
+
 
 
 // return array destroyed by caller
@@ -635,6 +706,11 @@ void getAllLegIndices( ObjectRecord *inObject, double inAge,
                        SimpleVector<int> *outList );
 
 
+int getEyesIndex( ObjectRecord *inObject, double inAge );
+
+int getMouthIndex( ObjectRecord *inObject, double inAge );
+
+
 
 char *getBiomesString( ObjectRecord *inObject );
 
@@ -659,8 +735,17 @@ doublePair getObjectCenterOffset( ObjectRecord *inObject );
 int getMaxWideRadius();
 
 
+typedef struct SubsetSpriteIndexMap {
+        int subIndex;
+        int superIndex;
+    } SubsetSpriteIndexMap;
+        
+
 // returns true if inSubObjectID's sprites are all part of inSuperObjectID
-char isSpriteSubset( int inSuperObjectID, int inSubObjectID );
+// pass in empty vector if index mapping is desired
+// passed-in vector is NOT filled with anything if object is not a sprite subset
+char isSpriteSubset( int inSuperObjectID, int inSubObjectID,
+                     SimpleVector<SubsetSpriteIndexMap> *outMapping = NULL );
 
 
 
@@ -684,6 +769,35 @@ void setupSpriteUseVis( ObjectRecord *inObject, int inUsesRemaining,
 
 
 char bothSameUseParent( int inAObjectID, int inBObjectID );
+
+
+
+// processes object ID for client consumption
+// hiding hidden variable object ids behind parent ID
+int hideIDForClient( int inObjectID );
+
+
+
+// leverages object's spriteSkipDrawing arrays to draw portion of
+// object (drawn behind or in front) or skip actual drawing of object entirely
+// saves object's spriteSkipDrawing to restore it later
+void prepareToSkipSprites( ObjectRecord *inObject, 
+                           char inDrawBehind, char inSkipAll = false );
+
+// restores spriteSkipDrawing for object to what it was before
+// prepareToSkipSprites was called
+void restoreSkipDrawing( ObjectRecord *inObject );
+
+
+int getMaxSpeechPipeIndex();
+
+
+
+// gets number of global trigger indices
+int getNumGlobalTriggers();
+
+int getMetaTriggerObject( int inTriggerIndex );
+
 
 
 #endif

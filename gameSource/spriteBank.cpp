@@ -56,6 +56,10 @@ static SimpleVector<SpriteLoadingRecord> loadingSprites;
 static SimpleVector<int> loadedSprites;
 
 
+static char *loadingFailureFileName = NULL;
+
+
+
 
 int getMaxSpriteID() {
     return maxID;
@@ -244,6 +248,9 @@ float initSpriteBankStep() {
     return (float)( currentFile ) / (float)( cache.numFiles );
     }
 
+
+static char spriteBankLoaded = false;
+
  
 
 void initSpriteBankFinish() {    
@@ -274,6 +281,13 @@ void initSpriteBankFinish() {
         }
 
     printf( "Loaded %d tagged sprites from sprites folder\n", numRecords );
+    spriteBankLoaded = true;
+    }
+
+
+
+char isSpriteBankLoaded() {
+    return spriteBankLoaded;
     }
 
 
@@ -367,6 +381,11 @@ static void freeSpriteRecord( int inID ) {
 
 void freeSpriteBank() {
     
+    if( loadingFailureFileName != NULL ) {
+        delete [] loadingFailureFileName;
+        }
+    
+
     for( int i=0; i<mapSize; i++ ) {
         if( idMap[i] != NULL ) {
             
@@ -389,6 +408,23 @@ void freeSpriteBank() {
     if( blankSprite != NULL ) {
         freeSprite( blankSprite );
         }
+
+    spriteBankLoaded = false;
+    }
+
+
+
+static void setLoadingFailureFileName( char *inNewFileName ) {
+    if( loadingFailureFileName != NULL ) {
+        delete [] loadingFailureFileName;
+        }
+    loadingFailureFileName = inNewFileName;
+    }
+
+
+
+char *getSpriteBankLoadFailure() {
+    return loadingFailureFileName;
     }
 
 
@@ -408,6 +444,9 @@ void stepSpriteBank() {
             if( data == NULL ) {
                 printf( "Reading sprite data from file failed, sprite ID %d\n",
                         loadingR->spriteID );
+
+                setLoadingFailureFileName(
+                    autoSprintf( "sprites/%d.tga", loadingR->spriteID ) );
                 }
             else {
                 
@@ -421,6 +460,9 @@ void stepSpriteBank() {
                             loadingR->spriteID );
                     delete spriteImage;
                     spriteImage = NULL;
+                    
+                    setLoadingFailureFileName(
+                        autoSprintf( "sprites/%d.tga", loadingR->spriteID ) );
                     }
                             
                 if( spriteImage != NULL ) {
@@ -535,12 +577,16 @@ void stepSpriteBank() {
         if( r->numStepsUnused > 600 ) {
             // 10 seconds not drawn
             
-            freeSprite( r->sprite );
-            r->sprite = NULL;
+            if( r->sprite != NULL ) {    
+                freeSprite( r->sprite );
+                r->sprite = NULL;
+                }
             
-            delete [] r->hitMap;
-            r->hitMap = NULL;
-
+            if( r->hitMap != NULL ) {
+                delete [] r->hitMap;
+                r->hitMap = NULL;
+                }
+            
             r->loading = false;
 
             loadedSprites.deleteElement( i );
@@ -560,6 +606,18 @@ SpriteRecord *getSpriteRecord( int inID ) {
     else {
         return NULL;
         }
+    }
+
+
+
+char *getSpriteTag( int inID ) {
+    SpriteRecord *r = getSpriteRecord( inID );
+    
+    if( r == NULL ) {
+        return NULL;
+        }
+    
+    return r->tag;
     }
 
 
@@ -1004,7 +1062,9 @@ int bakeSprite( const char *inTag,
                 int inNumSprites,
                 int *inSpriteIDs,
                 doublePair *inSpritePos,
-                char *inSpriteHFlips ) {
+                double *inSpriteRot,
+                char *inSpriteHFlips,
+                FloatRGB *inSpriteColors ) {
     
     File spritesDir( NULL, "sprites" );
             
@@ -1021,18 +1081,38 @@ int bakeSprite( const char *inTag,
         yOffsets[i] = lrint( inSpritePos[i].y );
 
         SpriteRecord *r = getSpriteRecord( inSpriteIDs[i] );
-        int radiusX = r->w / 2 + 
+        int radiusXA = r->w / 2 + 
             abs( r->centerAnchorXOffset ) + 
             abs( xOffsets[i] );
-        int radiusY = r->h / 2 + 
+        
+        // consider rotations
+        int radiusXB = r->h / 2 + 
+            abs( r->centerAnchorYOffset ) + 
+            abs( xOffsets[i] );
+        
+
+        int radiusYA = r->h / 2 + 
                  abs( r->centerAnchorYOffset )  + 
                  abs( yOffsets[i] );
+
+        // consider rotations
+        int radiusYB = r->w / 2 + 
+                 abs( r->centerAnchorXOffset )  + 
+                 abs( yOffsets[i] );
+
         
-        if( radiusX > baseRadiusX ) {
-            baseRadiusX = radiusX;
+        if( radiusXA > baseRadiusX ) {
+            baseRadiusX = radiusXA;
             }
-        if( radiusY > baseRadiusY ) {
-            baseRadiusY = radiusY;
+        if( radiusYA > baseRadiusY ) {
+            baseRadiusY = radiusYA;
+            }
+        
+        if( radiusXB > baseRadiusX ) {
+            baseRadiusX = radiusXB;
+            }
+        if( radiusYB > baseRadiusY ) {
+            baseRadiusY = radiusYB;
             }
         }
 
@@ -1051,7 +1131,7 @@ int bakeSprite( const char *inTag,
             
     
     for( int i=0; i<inNumSprites; i++ ) {
-        SpriteRecord *r = getSpriteRecord( inSpriteIDs[i] );
+        SpriteRecord *spriteRec = getSpriteRecord( inSpriteIDs[i] );
         
         char *fileNameTGA = autoSprintf( "%d.tga", inSpriteIDs[i] );
         
@@ -1074,50 +1154,160 @@ int bakeSprite( const char *inTag,
             int w = image->getWidth();
             int h = image->getHeight();
 
-            int centerX = w/2 + r->centerAnchorXOffset;
-            int centerY = h/2 + r->centerAnchorYOffset;
+
+            if( inSpriteHFlips[i] ||
+                inSpriteRot[i] != 0 ) {
+                
+                // expand until square to permit rotations without
+                // getting cut off
+                
+                int newWidth = w;
+                int newHeight = h;
+                if( w < h ) {
+                    newWidth = h;
+                    }
+                else if( h < w ) {
+                    newHeight = w;
+                    }
+                
+                int totalPossibleOffset = 
+                    2 * abs( spriteRec->centerAnchorXOffset ) +
+                    2 * abs( spriteRec->centerAnchorYOffset );
+                
+                newWidth += totalPossibleOffset;
+                newHeight += totalPossibleOffset;
+
+                if( newWidth != w ||
+                    newHeight != h ) {
+                    Image *biggerImage = image->expandImage( newWidth,
+                                                             newHeight );
+                    delete image;
+                    image = biggerImage;
+                    
+                    w = newWidth;
+                    h = newHeight;
+                    }
+                }
+
+
+            int centerX = w/2 + spriteRec->centerAnchorXOffset;
+            int centerY = h/2 + spriteRec->centerAnchorYOffset;
             
 
             double *chan[4];
             for( int c=0; c<4; c++ ) {
                 chan[c] = image->getChannel( c );
                 }
-                
-            int xSign = 1;
             
+            FloatRGB spriteColor = inSpriteColors[i];
+
+            float spriteColorParts[3] = {
+                spriteColor.r,
+                spriteColor.g,
+                spriteColor.b };
             
-            if( inSpriteHFlips[i] ) {
-                xSign = -1;
+
+            // number of clockwise 90 degree rotations
+            int numRotSteps = 0;
+            
+            if( inSpriteRot[i] != 0 ) {
+                double rot = inSpriteRot[i];
+
+                if( inSpriteHFlips[i] ) {
+                    rot *= -1;
+                    }
+
+                while( rot < 0 ) {
+                    rot += 1.0;
+                    }
+                while( rot > 1.0 ) {
+                    rot -= 1.0;
+                    }
+
+                numRotSteps = lrint( rot / 0.25 );
                 }
-                
+            
 
             for( int y = 0; y<h; y++ ) {
                 int baseY = ( y - centerY ) - yOffsets[i] + baseCenterY;
                 
                 for( int x = 0; x<w; x++ ) {
-                    int baseX = xSign * ( x - centerX ) + 
+                    int baseX = ( x - centerX ) + 
                         xOffsets[i] + baseCenterX;
+
+                    int finalX = x;
+                    int finalY = y;
+                    
+                    int xFromCenter = x - centerX;
+                    int yFromCenter = (y - centerY);
                     
                     if( inSpriteHFlips[i] ) {
-                        baseX -= 1;
+                        xFromCenter *= -1;
+                        xFromCenter -= 1;
                         }
 
-                    int i = y * w + x;
+                    for( int r=0; r<numRotSteps; r++ ) {
+                        int newX = yFromCenter;
+                        int newY = - xFromCenter;
+                        xFromCenter = newX;
+                        yFromCenter = newY;
+                        }
+                    
+                    finalX = xFromCenter + centerX;
+                    finalY = yFromCenter + centerY;
+                    
+                    
+                    // special case tweaks found by trial and error
+                    if( numRotSteps == 1 ) {
+                        finalY -= 1;
+                        }
+                    else if( numRotSteps == 2 ) {
+                        finalY -= 1;
+                        finalX -= 1;
+                        }
+                    else if( numRotSteps == 3 ) {
+                        finalX -= 1;
+                        }
+                    
+                    
+                    // might rotate out, skip these pixels if so
+                    if( finalY >= h || finalY < 0 ||
+                        finalX >= w || finalX < 0 ) {
+                        continue;
+                        }
+                        
+
+                    int i = finalY * w + finalX;
                     
                     int baseI = baseY * baseW + baseX;
                     
-                    for( int c=0; c<3; c++ ) {
-                        // blend dest and source using source alpha
-                        // as weight
-                        baseChan[c][baseI] = 
-                            (1 - chan[3][i] ) * baseChan[c][baseI] +
-                            chan[3][i] * chan[c][i];
+                    if( ! spriteRec->multiplicativeBlend ) {
+                        
+                        for( int c=0; c<3; c++ ) {
+                            // blend dest and source using source alpha
+                            // as weight
+                            baseChan[c][baseI] = 
+                                (1 - chan[3][i] ) * baseChan[c][baseI] +
+                                chan[3][i] * chan[c][i] * spriteColorParts[c];
+                            }
+                        
+                        // add alphas
+                        baseChan[3][baseI] += chan[3][i];
+                        if( baseChan[3][baseI] > 1.0 ) {
+                            baseChan[3][baseI] = 1.0;
+                            }
                         }
-                    
-                    // add alphas
-                    baseChan[3][baseI] += chan[3][i];
-                    if( baseChan[3][baseI] > 1.0 ) {
-                        baseChan[3][baseI] = 1.0;
+                    else {
+                        // multiplicative blend
+                        // ignore alphas
+
+                        // note that this will NOT work
+                        // if multiplicative sprite hangs out
+                        // beyond border of opaque non-multiplicative
+                        // parts below it.
+                        for( int c=0; c<3; c++ ) {
+                            baseChan[c][baseI] *= chan[c][i];
+                            }
                         }
                     }
                 }
