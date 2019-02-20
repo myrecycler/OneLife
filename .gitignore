@@ -54,3 +54,6 @@ server/curseSave.txt
 server/dataVersionNumber.txt
 server/eveRadius.txt
 server/serverCodeVersionNumber.txt
+gameSource/icon.ico
+gameSource/icon.rc
+gameSource/OneLife.exe
