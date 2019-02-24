@@ -156,7 +156,7 @@ void SettingsPage::actionPerformed( GUIComponent *inTarget ) {
             useCustomServer = 1;
             }
         
-        SettingsManager::setSetting( "useCustomServer", useCustomServer );
+        SettingsManager::setSetting( "useCustomServer_zh", useCustomServer );
         char *address = mCustomServerAddressField.getText();
         
         SettingsManager::setSetting( "customServerAddress", address );
@@ -438,7 +438,7 @@ void SettingsPage::makeActive( char inFresh ) {
 
 
         int useCustomServer = 
-            SettingsManager::getIntSetting( "useCustomServer", 0 );
+            SettingsManager::getIntSetting( "useCustomServer_zh", 0 );
         
         mUseCustomServerBox.setToggled( useCustomServer );
         

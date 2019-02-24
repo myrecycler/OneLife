@@ -429,7 +429,7 @@ static int stepsBetweenDeleteRepeat;
 
 
 static void updateDataVersionNumber() {
-    File file( NULL, "dataVersionNumber.txt" );
+    File file( NULL, "dataVersionNumber_zh.txt" );
     
     if( file.exists() ) {
         char *contents = file.readFileContents();
@@ -563,7 +563,7 @@ void initFrameDrawer( int inWidth, int inHeight, int inTargetFrameRate,
     postUpdate();
         
 
-    instructionsSprite = loadWhiteSprite( "instructions.tga" );
+    instructionsSprite = loadWhiteSprite( "instructions_zh.tga" );
     
     
 
@@ -1179,7 +1179,7 @@ void deleteCharFromUserTypedMessage() {
 static void startConnecting() {
     userReconnect = false;
     
-    if( SettingsManager::getIntSetting( "useCustomServer", 0 ) ) {
+    if( SettingsManager::getIntSetting( "useCustomServer_zh", 0 ) ) {
         usingCustomServer = true;
         
         if( serverIP != NULL ) {
@@ -1715,7 +1715,7 @@ void drawFrame( char inUpdate ) {
                     if( userEmail == NULL || accountKey == NULL ) {
                         autoLogIn = false;
                         }
-
+/*
                     if( clientVersionNumber == expectedVersionNumber ) { 
                         currentGamePage = existingAccountPage;
                         currentGamePage->base_makeActive( true );
@@ -1732,6 +1732,7 @@ void drawFrame( char inUpdate ) {
                         finalMessagePage->setSubMessage( autoSprintf( "THIS VERSION OF THE MOD IS OUTDATED##(EXPECTING VERSION %d - RUNNING VERSION %d)##PLEASE DOWNLOAD A NEWER VERSION FROM:####HTTPS://GITHUB.COM/AWBZ/ONELIFE/RELEASES/LATEST", expectedVersionNumber, clientVersionNumber ) );
                         currentGamePage->base_makeActive( true );
                     }
+						*/										currentGamePage = existingAccountPage;
                 }
             }
         else if( currentGamePage == settingsPage ) {

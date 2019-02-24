@@ -66,7 +66,7 @@ extern Font *pencilErasedFont;
 
 
 // to make all erased pencil fonts lighter
-static float pencilErasedFontExtraFade = 0.2;
+static float pencilErasedFontExtraFade = 0.05;
 
 
 extern doublePair lastScreenViewCenter;
@@ -1981,19 +1981,19 @@ LivingLifePage::LivingLifePage()
           mMapOffsetY( 0 ),
           mEKeyEnabled( false ),
           mEKeyDown( false ),
-          mGuiPanelSprite( loadSprite( "guiPanel.tga", false ) ),
+          mGuiPanelSprite( loadSprite( "guiPanel_zh.tga", false ) ),
           mGuiBloodSprite( loadSprite( "guiBlood.tga", false ) ),
           mNotePaperSprite( loadSprite( "notePaper.tga", false ) ),
           mFloorSplitSprite( loadSprite( "floorSplit.tga", false ) ),
           mCellBorderSprite( loadWhiteSprite( "cellBorder.tga" ) ),
           mCellFillSprite( loadWhiteSprite( "cellFill.tga" ) ),
-          mHomeSlipSprite( loadSprite( "homeSlip.tga", false ) ),
+          mHomeSlipSprite( loadSprite( "homeSlip_zh.tga", false ) ),
           mLastMouseOverID( 0 ),
           mCurMouseOverID( 0 ),
           mChalkBlotSprite( loadWhiteSprite( "chalkBlot.tga" ) ),
           mPathMarkSprite( loadWhiteSprite( "pathMark.tga" ) ),
           mSayField( handwritingFont, 0, 1000, 10, true, NULL,
-                     "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-,'?!/ " ),
+                     "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-,'?!/ 0123456789" ),
           mDeathReason( NULL ),
           mShowHighlights( true ),
           mUsingSteam( false ),
@@ -2063,9 +2063,9 @@ LivingLifePage::LivingLifePage()
         }
     
 
-    mHungerSlipSprites[0] = loadSprite( "fullSlip.tga", false );
-    mHungerSlipSprites[1] = loadSprite( "hungrySlip.tga", false );
-    mHungerSlipSprites[2] = loadSprite( "starvingSlip.tga", false );
+    mHungerSlipSprites[0] = loadSprite( "fullSlip_zh.tga", false );
+    mHungerSlipSprites[1] = loadSprite( "hungrySlip_zh.tga", false );
+    mHungerSlipSprites[2] = loadSprite( "starvingSlip_zh.tga", false );
     
 
     // not visible, drawn under world at 0, 0, and doesn't move with camera
@@ -19955,7 +19955,8 @@ char* LivingLifePage::getFertilityStatus( LiveObject* targetObject ) {
 
 
 void LivingLifePage::lineageFertilityPanel( LiveObject* ourLiveObject, char displayPanel ) {
-	if ( ! displayPanel ) return;
+	// this feature wont work perfectly now
+	if ( true || ! displayPanel ) return;
 	setDrawColor( 1, 1, 1, 1 );
 	doublePair fertPos = { lastScreenViewCenter.x + ( 685 * gui_fov_effective_scale ), 
 						   lastScreenViewCenter.y + ( 305 * gui_fov_effective_scale ) };
