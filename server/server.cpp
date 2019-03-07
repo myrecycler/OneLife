@@ -625,7 +625,9 @@ typedef struct LiveObject {
         
         char vogMode;
         GridPos preVogPos;
+        GridPos preVogBirthPos;
         int vogJumpIndex;
+        char postVogMode;
         
     } LiveObject;
 
@@ -3050,6 +3052,8 @@ static void setPlayerDisconnected( LiveObject *inPlayer,
         
         inPlayer->xs = p.x;
         inPlayer->ys = p.y;
+
+        inPlayer->birthPos = inPlayer->preVogBirthPos;
         }
     
     
@@ -5011,6 +5015,10 @@ int processLoggedInPlayer( Socket *inSock,
             continue;
             }
 
+        if( player->vogMode ) {
+            continue;
+            }
+
         if( isFertileAge( player ) ) {
             numOfAge ++;
             
@@ -5726,6 +5734,7 @@ int processLoggedInPlayer( Socket *inSock,
     newObject.holdingFlightObject = false;
 
     newObject.vogMode = false;
+    newObject.postVogMode = false;
     newObject.vogJumpIndex = 0;
     
                 
@@ -7975,18 +7984,23 @@ int main() {
                     }
                 }
             
-            // look at food decrement time too
-                
-            double timeLeft =
-                nextPlayer->foodDecrementETASeconds - curTime;
-                        
-            if( timeLeft < 0 ) {
-                timeLeft = 0;
-                }
-            if( timeLeft < minMoveTime ) {
-                minMoveTime = timeLeft;
-                }           
 
+            double timeLeft = minMoveTime;
+            
+            if( ! nextPlayer->vogMode ) {
+                // look at food decrement time too
+                
+                timeLeft =
+                    nextPlayer->foodDecrementETASeconds - curTime;
+                
+                if( timeLeft < 0 ) {
+                    timeLeft = 0;
+                    }
+                if( timeLeft < minMoveTime ) {
+                    minMoveTime = timeLeft;
+                    }           
+                }
+            
             // look at held decay too
             if( nextPlayer->holdingEtaDecay != 0 ) {
                 
@@ -9214,6 +9228,7 @@ int main() {
                     if( allow && nextPlayer->connected ) {
                         nextPlayer->vogMode = true;
                         nextPlayer->preVogPos = getPlayerPos( nextPlayer );
+                        nextPlayer->preVogBirthPos = nextPlayer->birthPos;
                         nextPlayer->vogJumpIndex = 0;
                         }
                     }
@@ -9238,13 +9253,31 @@ int main() {
                         
                         GridPos o = getPlayerPos( otherPlayer );
                         
+                        GridPos oldPos = getPlayerPos( nextPlayer );
+                        
+
                         nextPlayer->xd = o.x;
                         nextPlayer->yd = o.y;
 
                         nextPlayer->xs = o.x;
                         nextPlayer->ys = o.y;
 
-                        playerIndicesToSendUpdatesAbout.push_back( i );
+                        if( distance( oldPos, o ) > 10000 ) {
+                            nextPlayer->birthPos = o;
+                            }
+
+                        char *message = autoSprintf( "VU\n%d %d\n#",
+                                                     nextPlayer->xs - 
+                                                     nextPlayer->birthPos.x,
+                                                     nextPlayer->ys -
+                                                     nextPlayer->birthPos.y );
+                        sendMessageToPlayer( nextPlayer, message,
+                                             strlen( message ) );
+                        
+                        delete [] message;
+
+                        nextPlayer->firstMessageSent = false;
+                        nextPlayer->firstMapSent = false;
                         }
                     }
                 else if( m.type == VOGP ) {
@@ -9268,14 +9301,32 @@ int main() {
                                 nextPlayer->vogJumpIndex );
                         
                         GridPos o = getPlayerPos( otherPlayer );
+                        
+                        GridPos oldPos = getPlayerPos( nextPlayer );
+                        
 
                         nextPlayer->xd = o.x;
                         nextPlayer->yd = o.y;
 
                         nextPlayer->xs = o.x;
                         nextPlayer->ys = o.y;
+                        
+                        if( distance( oldPos, o ) > 10000 ) {
+                            nextPlayer->birthPos = o;
+                            }
+                        
+                        char *message = autoSprintf( "VU\n%d %d\n#",
+                                                     nextPlayer->xs - 
+                                                     nextPlayer->birthPos.x,
+                                                     nextPlayer->ys -
+                                                     nextPlayer->birthPos.y );
+                        sendMessageToPlayer( nextPlayer, message,
+                                             strlen( message ) );
+                        
+                        delete [] message;
 
-                        playerIndicesToSendUpdatesAbout.push_back( i );
+                        nextPlayer->firstMessageSent = false;
+                        nextPlayer->firstMapSent = false;
                         }
                     }
                 else if( m.type == VOGM ) {
@@ -9286,7 +9337,15 @@ int main() {
                         nextPlayer->xs = m.x;
                         nextPlayer->ys = m.y;
                         
-                        playerIndicesToSendUpdatesAbout.push_back( i );
+                        char *message = autoSprintf( "VU\n%d %d\n#",
+                                                     nextPlayer->xs - 
+                                                     nextPlayer->birthPos.x,
+                                                     nextPlayer->ys -
+                                                     nextPlayer->birthPos.y );
+                        sendMessageToPlayer( nextPlayer, message,
+                                             strlen( message ) );
+                        
+                        delete [] message;
                         }
                     }
                 else if( m.type == VOGI ) {
@@ -9325,18 +9384,23 @@ int main() {
                         nextPlayer->xs = p.x;
                         nextPlayer->ys = p.y;
                         
+                        nextPlayer->birthPos = nextPlayer->preVogBirthPos;
+
                         // send them one last VU message to move them 
                         // back instantly
-                        char *message = autoSprintf( "VU\n%d %d\n#", 
-                                                     nextPlayer->xs,
-                                                     nextPlayer->ys );
+                        char *message = autoSprintf( "VU\n%d %d\n#",
+                                                     nextPlayer->xs - 
+                                                     nextPlayer->birthPos.x,
+                                                     nextPlayer->ys -
+                                                     nextPlayer->birthPos.y );
                         sendMessageToPlayer( nextPlayer, message,
                                              strlen( message ) );
                         
                         delete [] message;
                         
-                        nextPlayer->posForced = true;
-                        playerIndicesToSendUpdatesAbout.push_back( i );
+                        nextPlayer->postVogMode = true;
+                        nextPlayer->firstMessageSent = false;
+                        nextPlayer->firstMapSent = false;
                         }
                     }
                 else if( nextPlayer->vogMode ) {
@@ -13872,19 +13936,10 @@ int main() {
                 continue;
                 }
             
-            // VOG players only receive updates about themselves
-            // handle this here, to take them out of circulation
             
             if( nextPlayer->vogMode ) {
-
-                char *message = autoSprintf( "VU\n%d %d\n#", 
-                                             nextPlayer->xs,
-                                             nextPlayer->ys );
-                
-                sendMessageToPlayer( nextPlayer, message,
-                                     strlen( message ) );
-                delete [] message;
-
+                // VOG players
+                // handle this here, to take them out of circulation
                 nextPlayer->updateSent = true;
                 continue;
                 }
@@ -14416,13 +14471,16 @@ int main() {
                 
                     LiveObject *o = players.getElement( i );
                 
-                    if( o != nextPlayer && o->error ) {
+                    if( ( o != nextPlayer && o->error ) 
+                        ||
+                        o->vogMode ) {
                         continue;
                         }
 
                     char oWasForced = o->posForced;
                     
-                    if( nextPlayer->inFlight ) {
+                    if( nextPlayer->inFlight || 
+                        nextPlayer->vogMode || nextPlayer->postVogMode ) {
                         // not a true first message
                         
                         // force all positions for all players
@@ -14436,7 +14494,8 @@ int main() {
                                                        nextPlayer->birthPos,
                                                        false, true );
                     
-                    if( nextPlayer->inFlight ) {
+                    if( nextPlayer->inFlight || 
+                        nextPlayer->vogMode || nextPlayer->postVogMode ) {
                         // restore
                         o->posForced = oWasForced;
                         }
@@ -14660,6 +14719,7 @@ int main() {
                 
                 nextPlayer->firstMessageSent = true;
                 nextPlayer->inFlight = false;
+                nextPlayer->postVogMode = false;
                 }
             else {
                 // this player has first message, ready for updates/moves
@@ -14846,7 +14906,8 @@ int main() {
                         LiveObject *otherPlayer = 
                             players.getElement( j );
                         
-                        if( otherPlayer->error ) {
+                        if( otherPlayer->error ||
+                            otherPlayer->vogMode ) {
                             continue;
                             }
 
