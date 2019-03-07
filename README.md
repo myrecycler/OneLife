@@ -13,7 +13,7 @@ and check for differences.
 
 一小时人生pc汉化版
 支持多字节字符并且整合了AWBZ的视距调节、表情快捷键等实用功能。
-服务端加入了一些实用指令（服务端正在整合）。
+服务端加入了一些实用指令，移至：https://github.com/moeonelife/OneLife
 
 另外需要下载下面的repo才能正常使用汉化
 https://github.com/cnwillz/minorGems
