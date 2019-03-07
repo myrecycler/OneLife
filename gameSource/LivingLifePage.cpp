@@ -2754,7 +2754,7 @@ void LivingLifePage::drawChalkBackgroundString( doublePair inPos,
         return;
         }
 
-    double lineSpacing = handwritingFont->getFontHeight() / 2 + ( 5 * gui_fov_scale );
+    double lineSpacing = handwritingFont->getFontHeight() / 2 + 5;
     
     double firstLineY =  inPos.y + ( lines->size() - 1 ) * lineSpacing;
     
@@ -2786,12 +2786,12 @@ void LivingLifePage::drawChalkBackgroundString( doublePair inPos,
     char colorOnly = false;
     
     if( savingSpeech && savingSpeechColor && inFade == 1.0 ) {
-        drawSquare( inPos, 1024 * gui_fov_scale );
+        drawSquare( inPos, 1024 * 1 );
         colorOnly = true;
         }
     else if( savingSpeech && savingSpeechMask && inFade == 1.0 ) {
         setDrawColor( 0, 0, 0, 1.0 );
-        drawSquare( inPos, 1024 * gui_fov_scale );
+        drawSquare( inPos, 1024 * 1 );
         setDrawColor( 1, 1, 1, 1 );
         maskOnly = true;
         }
@@ -7182,7 +7182,7 @@ void LivingLifePage::draw( doublePair inViewCenter,
 
 
 
-    int lineSpacing = 20 * gui_fov_scale;
+    int lineSpacing = 20 * 1;
 
     doublePair notePos = add( mNotePaperPosOffset, lastScreenViewCenter );
 
@@ -7218,12 +7218,12 @@ void LivingLifePage::draw( doublePair inViewCenter,
         
         delete [] partialSay;
 
-        SimpleVector<char*> *lines = splitLines( strUpper, ( 345 * gui_fov_scale ) );
+        SimpleVector<char*> *lines = splitLines( strUpper, ( 345 * 1 ) );
         
         mNotePaperPosTargetOffset.y = mNotePaperHideOffset.y + 58;
         
         if( lines->size() > 1 ) {    
-            mNotePaperPosTargetOffset.y += (20 * gui_fov_scale) * ( lines->size() - 1 );
+            mNotePaperPosTargetOffset.y += (20 * 1) * ( lines->size() - 1 );
             }
         
         doublePair drawPos = paperPos;
@@ -7658,7 +7658,7 @@ void LivingLifePage::draw( doublePair inViewCenter,
 		panelPos.y = lastScreenViewCenter.y - ( 296 * gui_fov_effective_scale );
 	}
 	// Ugly "hack" for hint [TAB] being cut off at the bottom.
-	if( gui_fov_scale_hud > 0 && gui_fov_scale <= 2 ) {
+	if( gui_fov_scale_hud > 0 && 1 <= 2 ) {
 		panelPos.x -= 900;
 		drawSprite( mGuiPanelSprite, panelPos );
 		panelPos.x += 1810;
@@ -19545,11 +19545,6 @@ void LivingLifePage::keyDown( unsigned char inASCII ) {
             break;
         case 96: { // grave
             int currentScaleHUD = SettingsManager::getIntSetting( "fovScaleHUD", 0 );
-            int newScaleHUD = !currentScaleHUD;
-            SettingsManager::setSetting( "fovScaleHUD", newScaleHUD );
-            gui_fov_scale_hud = newScaleHUD;
-            float scaleHUD = gui_fov_scale;			
-            changeHUDFOV( scaleHUD );
             }
             break;
         case 127: { // DEL
@@ -19594,6 +19589,13 @@ void LivingLifePage::keyDown( unsigned char inASCII ) {
             if( ! mSayField.isFocused() ) {
                 // start typing a filter
                 mSayField.setText( "/" );
+                mSayField.focus();
+                }
+            break;
+		case '.':
+            if( ! mSayField.isFocused() ) {
+                // start typing a filter
+                mSayField.setText( "." );
                 mSayField.focus();
                 }
             break;

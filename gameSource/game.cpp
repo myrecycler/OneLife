@@ -205,9 +205,9 @@ void setFOVScale() {
     sanityCheckSettings( "fovScaleHUD" );
     sanityCheckSettings( "fovPreferredMin" );
     sanityCheckSettings( "fovPreferredMax" );
-    gui_fov_scale_hud = SettingsManager::getIntSetting( "fovScaleHUD", 0 );
+    gui_fov_scale_hud = 0;//SettingsManager::getIntSetting( "fovScaleHUD", 0 );
     SettingsManager::setSetting( "fovScaleHUD", gui_fov_scale_hud );
-    gui_fov_scale = SettingsManager::getFloatSetting( "fovScale", 1.0f );
+    gui_fov_scale = 1;//SettingsManager::getFloatSetting( "fovScale", 1.0f );
     if( ! gui_fov_scale || gui_fov_scale < 1 ) {
         SettingsManager::setSetting( "fovScale", 1.0f );
     } else if ( gui_fov_scale > 6 ) {
