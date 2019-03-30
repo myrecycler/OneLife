@@ -6993,7 +6993,8 @@ void apocalypseStep() {
             // don't actually send request to reflector if apocalypse
             // not possible locally
             // or if broadcast mode disabled
-            if( SettingsManager::getIntSetting( "apocalypsePossible", 0 ) &&
+            if( SettingsManager::getIntSetting( "remoteReport", 0 ) &&
+                SettingsManager::getIntSetting( "apocalypsePossible", 0 ) &&
                 SettingsManager::getIntSetting( "apocalypseBroadcast", 0 ) ) {
 
                 printf( "Checking for remote apocalypse\n" );
@@ -7071,6 +7072,7 @@ void apocalypseStep() {
 
             // only broadcast to reflector if apocalypseBroadcast set
             if( !apocalypseRemote &&
+                SettingsManager::getIntSetting( "remoteReport", 0 ) &&
                 SettingsManager::getIntSetting( "apocalypseBroadcast", 0 ) &&
                 apocalypseRequest == NULL && reflectorURL != NULL ) {
                 
