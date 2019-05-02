@@ -2306,7 +2306,7 @@ LivingLifePage::LivingLifePage()
     // FOVMOD NOTE:  Change 3/26 - Take these lines during the merge process
 	calcOffsetHUD();
 
-	Image *tempImage = readTGAFile( "guiPanel.tga" );
+	Image *tempImage = readTGAFile( "guiPanel_zh.tga" );
 	Image *tempImage2;
 
 	tempImage2 = tempImage->getSubImage( tempImage->getWidth() / 2 - 640, 0, 512, tempImage->getHeight() );
