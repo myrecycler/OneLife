@@ -289,9 +289,6 @@ void Picker::actionPerformed( GUIComponent *inTarget ) {
     if( isCommandKeyDown() ) {
         skipAmount *= 5;
         }
-    if( isShiftKeyDown() ) {
-        skipAmount *= 5;
-        }
     
     if( inTarget == &mNextButton ) {
         mSkip += skipAmount;
@@ -392,7 +389,7 @@ void Picker::draw() {
             doublePair textPos = pos;
             textPos.x += 52;
             
-            setDrawColor( mPickable->getTextColor( mResults[i] ) );
+            setDrawColor( 0, 0, 0, 1 );
             
             const char *text = mPickable->getText( mResults[i] );
             

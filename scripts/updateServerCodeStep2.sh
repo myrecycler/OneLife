@@ -2,23 +2,6 @@
 # servers (which waits for them to shutdown), and finally brings
 # odd servers back up.
 
-wipeMaps = 0
-
-if [ $# -eq 1 ]
-then
-	wipeMaps=$1
-fi
-
-withMapWipeNote=""
-serverStartupCommand="~/checkout/OneLife/scripts/remoteServerStartup.sh"
-
-if [ $wipeMaps -eq 1 ]
-then
-	withMapWipeNote=" (with map wipe)"
-	serverStartupCommand="~/checkout/OneLife/scripts/remoteServerWipeMap.sh"
-fi
-
-
 
 echo "" 
 echo "Triggering EVEN remote server restarts."
@@ -31,8 +14,8 @@ while read user server port
 do
 	if [ $((i % 2)) -eq 0 ];
 	then
-		echo "  Triggering server startup$withMapWipeNote on $server"
-		ssh -n $user@$server "$serverStartupCommand"
+		echo "  Triggering server startup on $server"
+		ssh -n $user@$server '~/checkout/OneLife/scripts/remoteServerStartup.sh'
 	fi
 	i=$((i + 1))
 done <  <( grep "" ~/www/reflector/remoteServerList.ini )
@@ -70,8 +53,8 @@ while read user server port
 do
 	if [ $((i % 2)) -eq 1 ];
 	then
-		echo "  Triggering server startup$withMapWipeNote on $server"
-		ssh -n $user@$server "$serverStartupCommand"
+		echo "  Triggering server startup on $server"
+		ssh -n $user@$server '~/checkout/OneLife/scripts/remoteServerStartup.sh'
 	fi
 	i=$((i + 1))
 done <  <( grep "" ~/www/reflector/remoteServerList.ini )

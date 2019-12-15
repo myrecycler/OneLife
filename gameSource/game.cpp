@@ -1,14 +1,7 @@
-int versionNumber = 294;
+int versionNumber = 235;
 int dataVersionNumber = 0;
 
 int binVersionNumber = versionNumber;
-
-// Note to modders:
-// Please use this tag to describe your client honestly and uniquely
-// client_official is reserved for the unmodded client
-// do not include whitespace in your tag
-const char *clientTag = "client_awbz";
-
 
 
 int expectedVersionNumber = 0;
@@ -83,8 +76,6 @@ CustomRandomSource randSource( 34957197 );
 
 #include "emotion.h"
 #include "photos.h"
-#include "lifeTokens.h"
-#include "fitnessScore.h"
 
 
 #include "FinalMessagePage.h"
@@ -97,8 +88,6 @@ CustomRandomSource randSource( 34957197 );
 #include "SettingsPage.h"
 #include "ReviewPage.h"
 #include "TwinPage.h"
-#include "PollPage.h"
-#include "GeneticHistoryPage.h"
 //#include "TestPage.h"
 
 #include "ServerActionPage.h"
@@ -151,8 +140,6 @@ RebirthChoicePage *rebirthChoicePage;
 SettingsPage *settingsPage;
 ReviewPage *reviewPage;
 TwinPage *twinPage;
-PollPage *pollPage;
-GeneticHistoryPage *geneticHistoryPage;
 //TestPage *testPage = NULL;
 
 
@@ -198,6 +185,7 @@ double viewHeight = 720 * gui_fov_scale;
 // Usually, if screen is not 16:9, it will be taller, not wider,
 // and we will put letterbox bars on the top and bottom 
 double visibleViewWidth = viewWidth;
+
 
 
 
@@ -782,14 +770,10 @@ void initFrameDrawer( int inWidth, int inHeight, int inTargetFrameRate,
 
     reviewPage = new ReviewPage( reviewURL );
     
+    delete [] reviewURL;
 
     twinPage = new TwinPage();
 
-    pollPage = new PollPage( reviewURL );
-    delete [] reviewURL;
-    
-    geneticHistoryPage = new GeneticHistoryPage();
-    
 
     // 0 music headroom needed, because we fade sounds before playing music
     setVolumeScaling( 10, 0 );
@@ -876,8 +860,6 @@ void freeFrameDrawer() {
     delete settingsPage;
     delete reviewPage;
     delete twinPage;
-    delete pollPage;
-    delete geneticHistoryPage;
     
     //if( testPage != NULL ) {
     //    delete testPage;
@@ -903,8 +885,7 @@ void freeFrameDrawer() {
     freeEmotion();
     
     freePhotos();
-    freeLifeTokens();
-    freeFitnessScore();
+    
 
     if( reflectorURL != NULL ) {
         delete [] reflectorURL;
@@ -965,17 +946,8 @@ static void drawPauseScreen() {
 
     mainFont->drawString( translate( "pauseMessage1" ), 
                            messagePos, alignCenter );
-
-    // SERVER DISPLAY NOTE:  Change 1/1 - Take these lines during the merge process
-    if( serverIP != NULL ) {
-        messagePos.y -= 0.625 * (viewHeight / 15);
-        mainFont->drawString( autoSprintf("%s", serverIP),
-                              messagePos, alignCenter );
-        messagePos.y -= 0.625 * (viewHeight / 15);
-        }
-    else {
-        messagePos.y -= 1.250 * (viewHeight / 15);
-        }
+        
+    messagePos.y -= 1.25 * (viewHeight / 15);
     mainFont->drawString( translate( "pauseMessage2" ), 
                            messagePos, alignCenter );
 
@@ -1767,9 +1739,6 @@ void drawFrame( char inUpdate ) {
                     initEmotion();
                     initPhotos();
                     
-                    initLifeTokens();
-                    initFitnessScore();
-                    
                     initMusicPlayer();
                     setMusicLoudness( musicLoudness );
                     
@@ -1835,13 +1804,8 @@ void drawFrame( char inUpdate ) {
             }
         else if( currentGamePage == twinPage ) {
             if( twinPage->checkSignal( "cancel" ) ) {
-                if( isHardToQuitMode() ) {
-                    currentGamePage = rebirthChoicePage;
-                    }
-                else {
-                    existingAccountPage->setStatus( NULL, false );
-                    currentGamePage = existingAccountPage;
-                    }
+                existingAccountPage->setStatus( NULL, false );
+                currentGamePage = existingAccountPage;
                 currentGamePage->base_makeActive( true );
                 }
             else if( twinPage->checkSignal( "done" ) ) {
@@ -1852,14 +1816,6 @@ void drawFrame( char inUpdate ) {
             if( existingAccountPage->checkSignal( "quit" ) ) {
                 // NAMEMOD NOTE:  Change 4/5 - Take these lines during the merge process
                 freeAndQuit();
-                }
-            else if( existingAccountPage->checkSignal( "poll" ) ) {
-                currentGamePage = pollPage;
-                currentGamePage->base_makeActive( true );
-                }
-            else if( existingAccountPage->checkSignal( "genes" ) ) {
-                currentGamePage = geneticHistoryPage;
-                currentGamePage->base_makeActive( true );
                 }
             else if( existingAccountPage->checkSignal( "settings" ) ) {
                 currentGamePage = settingsPage;
@@ -2041,21 +1997,6 @@ void drawFrame( char inUpdate ) {
 
                 currentGamePage->base_makeActive( true );
                 }
-            else if( livingLifePage->checkSignal( "noLifeTokens" ) ) {
-                lastScreenViewCenter.x = 0;
-                lastScreenViewCenter.y = 0;
-
-                setViewCenterPosition( lastScreenViewCenter.x, 
-                                       lastScreenViewCenter.y );
-                
-                currentGamePage = existingAccountPage;
-                
-                existingAccountPage->setStatus( "noLifeTokens", true );
-
-                existingAccountPage->setStatusPositiion( true );
-
-                currentGamePage->base_makeActive( true );
-                }
             else if( livingLifePage->checkSignal( "connectionFailed" ) ) {
                 lastScreenViewCenter.x = 0;
                 lastScreenViewCenter.y = 0;
@@ -2100,19 +2041,15 @@ void drawFrame( char inUpdate ) {
                 }
             else if( livingLifePage->checkSignal( "twinCancel" ) ) {
                 
+                existingAccountPage->setStatus( NULL, false );
+
                 lastScreenViewCenter.x = 0;
                 lastScreenViewCenter.y = 0;
 
                 setViewCenterPosition( lastScreenViewCenter.x, 
                                        lastScreenViewCenter.y );
                 
-                if( isHardToQuitMode() ) {
-                    currentGamePage = rebirthChoicePage;
-                    }
-                else {
-                    existingAccountPage->setStatus( NULL, false );    
-                    currentGamePage = existingAccountPage;
-                    }
+                currentGamePage = existingAccountPage;
                 
                 currentGamePage->base_makeActive( true );
                 }
@@ -2198,23 +2135,6 @@ void drawFrame( char inUpdate ) {
                     currentGamePage = livingLifePage;
                     }
                 else {
-                    currentGamePage = pollPage;
-                    }
-                currentGamePage->base_makeActive( true );
-                }
-            }
-        else if( currentGamePage == pollPage ) {
-            if( pollPage->checkSignal( "done" ) ) {
-                currentGamePage = rebirthChoicePage;
-                currentGamePage->base_makeActive( true );
-                }
-            }
-        else if( currentGamePage == geneticHistoryPage ) {
-            if( geneticHistoryPage->checkSignal( "done" ) ) {
-                if( !isHardToQuitMode() ) {
-                    currentGamePage = existingAccountPage;
-                    }
-                else {
                     currentGamePage = rebirthChoicePage;
                     }
                 currentGamePage->base_makeActive( true );
@@ -2239,14 +2159,6 @@ void drawFrame( char inUpdate ) {
                 }
             else if( rebirthChoicePage->checkSignal( "menu" ) ) {
                 currentGamePage = existingAccountPage;
-                currentGamePage->base_makeActive( true );
-                }
-            else if( rebirthChoicePage->checkSignal( "genes" ) ) {
-                currentGamePage = geneticHistoryPage;
-                currentGamePage->base_makeActive( true );
-                }
-            else if( rebirthChoicePage->checkSignal( "friends" ) ) {
-                currentGamePage = twinPage;
                 currentGamePage->base_makeActive( true );
                 }
             else if( rebirthChoicePage->checkSignal( "quit" ) ) {

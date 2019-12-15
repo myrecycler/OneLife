@@ -15,11 +15,9 @@ set rmargin 6
 set size 1.0, .8
 
 set grid ytics linewidth 4
-set grid xtics linewidth 4
 show grid
 
-set xtics 3600 * 24 * 30
-set xtics rotate by -90
+set xtics rotate by -45
 
 set key off
 
@@ -41,11 +39,10 @@ set format x "%b/%d"
 #set decimal locale
 #set format y "%'g"
 
-set xtics out
 
 set style fill solid noborder
 
 set size 1, .8
 
 
-plot "playerStatsTrimmed3_ave.dat" using ($1 - ( 8 * 3600 ) ):($2) with filledcurves y1=0 fillcolor rgb "#000066", "" using ($1 - ( 8 * 3600 ) ):($3) with lines lw 3 lt 1 linecolor rgb "#FF0000"
+plot "playerStatsTrimmed.dat" using ($1 - ( 8 * 3600 ) ):($2) with filledcurves y1=0 fillcolor rgb "#000000"

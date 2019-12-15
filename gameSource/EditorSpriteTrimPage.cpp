@@ -326,7 +326,6 @@ void EditorSpriteTrimPage::actionPerformed( GUIComponent *inTarget ) {
             char *spriteInvisibleWhenHolding = new char[ numSprites ];
             int *spriteInvisibleWhenWorn = new int[ numSprites ];
             char *spriteBehindSlots = new char[ numSprites ];
-            char *spriteInvisibleWhenContained = new char[ numSprites ];
             char *spriteIsHead = new char[ numSprites ];
             char *spriteIsBody = new char[ numSprites ];
             char *spriteIsBackFoot = new char[ numSprites ];
@@ -551,7 +550,6 @@ void EditorSpriteTrimPage::actionPerformed( GUIComponent *inTarget ) {
                 spriteInvisibleWhenHolding[i] = false;
                 spriteInvisibleWhenWorn[i] = false;
                 spriteBehindSlots[i] = false;
-                spriteInvisibleWhenContained[i] = false;
                 spriteIsHead[i] = false;
                 spriteIsBody[i] = false;
                 spriteIsBackFoot[i] = false;
@@ -641,7 +639,6 @@ void EditorSpriteTrimPage::actionPerformed( GUIComponent *inTarget ) {
                        spriteInvisibleWhenHolding,
                        spriteInvisibleWhenWorn,
                        spriteBehindSlots,
-                       spriteInvisibleWhenContained,
                        spriteIsHead,
                        spriteIsBody,
                        spriteIsBackFoot,
@@ -665,7 +662,6 @@ void EditorSpriteTrimPage::actionPerformed( GUIComponent *inTarget ) {
             delete [] spriteInvisibleWhenHolding;
             delete [] spriteInvisibleWhenWorn;
             delete [] spriteBehindSlots;
-            delete [] spriteInvisibleWhenContained;
             delete [] spriteIsHead;
             delete [] spriteIsBody;
             delete [] spriteIsBackFoot;

@@ -40,10 +40,6 @@ char initMap();
 void freeMap( char inSkipCleanup = false );
 
 
-// loads seed from file, or generates a new one and saves it to file
-void reseedMap( char inForceFresh );
-
-
 // can only be called before initMap or after freeMap
 // deletes the underlying .db files for the map 
 void wipeMapFiles();
@@ -62,11 +58,7 @@ void resetEveRadius();
 // considered.
 void getEvePosition( const char *inEmail, int inID, int *outX, int *outY,
                      SimpleVector<GridPos> *inOtherPeoplePos,
-                     char inAllowRespawn = true,
-                     // true if we should increment position for advancing
-                     // eve grid or spiral placement
-                     // false to just sample the current position with no update
-                     char inIncrementPosition = true );
+                     char inAllowRespawn = true );
 
 
 // save recent placements on Eve's death so that this player can spawn
@@ -295,17 +287,8 @@ int getMapObjectRaw( int inX, int inY );
 
 // next landing strip in line, in round-the-world circuit across all
 // landing positions
-// radius limit limits flights from inside that square radius
-// from leaving (though flights from outside are unrestriced)
 GridPos getNextFlightLandingPos( int inCurrentX, int inCurrentY,
-                                 doublePair inDir,
-                                 int inRadiusLimit = -1 );
-
-
-
-GridPos getClosestLandingPos( GridPos inTargetPos, char *outFound );
-
-
+                                 doublePair inDir );
 
 
 // get and set player ID for grave on map

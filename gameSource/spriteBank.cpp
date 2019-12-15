@@ -24,7 +24,6 @@ static int mapSize;
 // maps IDs to records
 // sparse, so some entries are NULL
 static SpriteRecord **idMap;
-static char *spriteDrawnMap = NULL;
 
 
 static StringTree tree;
@@ -80,17 +79,6 @@ void enableSpriteSearch( char inEnable ) {
 
 
 
-// skip all non-txt files (only read meta data files on init, 
-// not bulk data tga files)
-static char shouldFileBeCached( char *inFileName ) {
-    if( strstr( inFileName, ".txt" ) != NULL &&
-        strcmp( inFileName, "nextSpriteNumber.txt" ) != 0 ) {
-        return true;
-        }
-    return false;
-    }
-
-
 
 int initSpriteBankStart( char *outRebuildingCache ) {
     maxID = 0;
@@ -99,19 +87,9 @@ int initSpriteBankStart( char *outRebuildingCache ) {
     currentBinFile = 0;
     
     char rebuildingA, rebuildingB;
-    
+    cache = initFolderCache( "sprites", &rebuildingA );
 
     binCache = initBinFolderCache( "sprites", ".tga", &rebuildingB );
-
-    char forceRebuild = false;
-
-    if( rebuildingB ) {
-        forceRebuild = true;
-        }
-
-    cache = initFolderCache( "sprites", &rebuildingA, shouldFileBeCached,
-                             forceRebuild );
-    
 
     *outRebuildingCache = rebuildingA || rebuildingB;
     
@@ -302,7 +280,10 @@ float initSpriteBankStep() {
 
         char *fileName = getFileName( cache, i );
     
-        if( shouldFileBeCached( fileName ) ) {
+        // skip all non-txt files (only read meta data files on init, 
+        // not bulk data tga files)
+        if( strstr( fileName, ".txt" ) != NULL &&
+            strcmp( fileName, "nextSpriteNumber.txt" ) != 0 ) {
                             
             //printf( "Loading sprite from path %s\n", fileName );
 
@@ -422,9 +403,6 @@ float initSpriteBankStep() {
                 idMap[i] = NULL;
                 }
             
-            spriteDrawnMap = new char[mapSize];
-            
-
             int numRecords = records.size();
             for( int i=0; i<numRecords; i++ ) {
                 SpriteRecord *r = records.getElementDirect(i);
@@ -470,21 +448,13 @@ float initSpriteBankStep() {
                                                            fileName, 
                                                            &contSize );
                 if( contents != NULL ) {
+                    loadSpriteFromRawTGAData( spriteID, contents, contSize );
                     
-                    // there might be tga file that we have no .txt file, 
-                    // and thus no record
-                    // Note that we still must read content for such a file,
-                    // because binCache must be read in order.
                     SpriteRecord *r = getSpriteRecord( spriteID );
                     
-                    if( r != NULL ) {
-                        loadSpriteFromRawTGAData( 
-                            spriteID, contents, contSize );
-                    
-                        r->numStepsUnused = 0;
-                        loadedSprites.push_back( spriteID );
-                        }
-                    
+                    r->numStepsUnused = 0;
+                    loadedSprites.push_back( spriteID );
+
                     delete [] contents;
                     }
                 }
@@ -639,9 +609,6 @@ void freeSpriteBank() {
         freeSprite( blankSprite );
         }
 
-    delete [] spriteDrawnMap;
-
-
     spriteBankLoaded = false;
     }
 
@@ -791,27 +758,6 @@ void setRemapFraction( double inFraction ) {
 
 
 
-static char countingSpriteDraws = false;
-
-void startCountingUniqueSpriteDraws() {
-    memset( spriteDrawnMap, 0, mapSize );
-    countingSpriteDraws = true;
-    }
-
-
-unsigned int endCountingUniqueSpriteDraws() {
-    unsigned int c = 0;
-    for( int i=0; i<mapSize; i++ ) {
-        if( spriteDrawnMap[i] ) {
-            c ++;
-            }
-        }
-    countingSpriteDraws = false;
-    return c;
-    }
-
-
-
 SpriteHandle getSprite( int inID ) {
     if( inID >= mapSize || idMap[ inID ] == NULL ) {
         return NULL;
@@ -861,10 +807,6 @@ SpriteHandle getSprite( int inID ) {
     if( idMap[inID]->sprite == NULL ) {
         loadSpriteImage( inID );
         return blankSprite;
-        }
-    
-    if( countingSpriteDraws ) {
-        spriteDrawnMap[inID] = true;
         }
             
     idMap[inID]->numStepsUnused = 0;
@@ -1108,9 +1050,6 @@ int addSprite( const char *inTag, SpriteHandle inSprite,
         delete [] idMap;
         idMap = newMap;
         mapSize = newMapSize;
-        
-        delete [] spriteDrawnMap;
-        spriteDrawnMap = new char[ mapSize ];
         }
 
     SpriteRecord *r = new SpriteRecord;
@@ -1465,18 +1404,14 @@ int bakeSprite( const char *inTag,
                         }
                     else {
                         // multiplicative blend
-                        // ignore alphas, except as hard mask for which
-                        // parts are blended
+                        // ignore alphas
 
-                        if( chan[3][i] > 0 ) {
-
-                            // note that this will NOT work
-                            // if multiplicative sprite hangs out
-                            // beyond border of opaque non-multiplicative
-                            // parts below it.
-                            for( int c=0; c<3; c++ ) {
-                                baseChan[c][baseI] *= chan[c][i];
-                                }
+                        // note that this will NOT work
+                        // if multiplicative sprite hangs out
+                        // beyond border of opaque non-multiplicative
+                        // parts below it.
+                        for( int c=0; c<3; c++ ) {
+                            baseChan[c][baseI] *= chan[c][i];
                             }
                         }
                     }

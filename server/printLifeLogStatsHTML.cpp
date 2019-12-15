@@ -388,7 +388,7 @@ void printCommaInt( FILE *inFile, int inInt ) {
     if( billions > 0 ) {
         fprintf( inFile, "%d,", billions );
         }
-    if( billions > 0 || millions > 0 ) {
+    if( millions > 0 ) {
         if( origInt > 999999999 ) {
             fprintf( inFile, "%03d,", millions );
             }
@@ -396,7 +396,7 @@ void printCommaInt( FILE *inFile, int inInt ) {
             fprintf( inFile, "%d,", millions );
             }
         }
-    if( billions > 0 || millions > 0 || thousands > 0 ) {
+    if( thousands > 0 ) {
         if( origInt > 999999 ) {
             fprintf( inFile, "%03d,", thousands );
             }

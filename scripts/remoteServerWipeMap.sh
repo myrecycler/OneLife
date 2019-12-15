@@ -70,8 +70,6 @@ then
 	rm ~/checkout/OneLife/server/eveRadius.txt
 	rm ~/checkout/OneLife/server/mapDummyRecall.txt
 	rm ~/checkout/OneLife/server/lastEveLocation.txt
-	rm ~/checkout/OneLife/server/biomeRandSeed.txt
-
 	echo "0,0" > ~/checkout/OneLife/server/shutdownLongLineagePos.txt
 fi
 

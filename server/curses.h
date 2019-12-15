@@ -1,5 +1,4 @@
 #include "minorGems/util/SimpleVector.h"
-#include "../gameSource/GridPos.h"
 
 
 void initCurses();
@@ -8,7 +7,7 @@ void freeCurses();
 
 
 void cursesLogBirth( char *inEmail );
-void cursesLogDeath( char *inEmail, double inAge, GridPos inDeathPos );
+void cursesLogDeath( char *inEmail, double inAge );
 
 
 
@@ -25,22 +24,9 @@ void getNewCurseTokenHolders( SimpleVector<char*> *inEmailList );
 
 
 
-// spends token and registers a curse
 // returns true of curse effective
-// enforces inMaxDistance for dead receivers only
-// (position of living players isn't tracked internally)
 char cursePlayer( int inGiverID, int inGiverLineageEveID, 
-                  char *inGiverEmail, GridPos inGiverPos,
-                  double inMaxDistance,
-                  char *inReceiverName );
-
-
-// spends a token directly
-// returns true if spent
-char spendCurseToken( char *inGiverEmail );
-
-
-
+                  char *inGiverEmail, char *inReceiverName );
 
 void logPlayerNameForCurses( char *inPlayerEmail, char *inPlayerName,
                              int inLineageEveID );
@@ -61,18 +47,7 @@ CurseStatus getCurseLevel( char *inPlayerEmail );
 
 
 // true if name already exists in curse system
-char isNameDuplicateForCurses( const char *inPlayerName );
+char isNameDuplicateForCurses( char *inPlayerName );
 
 
 void stepCurseServerRequests();
-
-
-// check if curse system has lineage information for a given player name
-// returns -1 on failure
-int getCurseReceiverLineageEveID( char *inReceiverName );
-
-
-
-// NOT destroyed by caller
-// NULL if not found
-char *getCurseReceiverEmail( char *inReceiverName );

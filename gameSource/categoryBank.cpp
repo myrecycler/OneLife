@@ -43,14 +43,6 @@ static int maxID;
 static int maxObjectID;
 
 
-static char shouldFileBeCached( char *inFileName ) {
-    if( strstr( inFileName, ".txt" ) != NULL ) {
-        return true;
-        }
-    return false;
-    }
-
-
 
 int initCategoryBankStart( char *outRebuildingCache ) {
     maxID = 0;
@@ -59,8 +51,7 @@ int initCategoryBankStart( char *outRebuildingCache ) {
     currentFile = 0;
     
 
-    cache = initFolderCache( "categories", outRebuildingCache,
-                             shouldFileBeCached );
+    cache = initFolderCache( "categories", outRebuildingCache );
 
     return cache.numFiles;
     }
@@ -79,7 +70,7 @@ float initCategoryBankStep() {
                 
     char *txtFileName = getFileName( cache, i );
             
-    if( shouldFileBeCached( txtFileName ) ) {
+    if( strstr( txtFileName, ".txt" ) != NULL ) {
                             
         // a category txt file!
                     

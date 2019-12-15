@@ -104,14 +104,9 @@ int getEmotionIndex( const char *inSpeech ) {
         if( strstr( upperSpeech, emotions.getElement(i)->triggerWord ) ==
             upperSpeech ) {
             
-            int triggerLen = strlen( emotions.getElement(i)->triggerWord );
-
-            if( upperSpeech[ triggerLen ] == '\0' ) {
-
-                // starts with trigger and contains nothing but trigger
-                delete [] upperSpeech;
-                return i;
-                }
+            // starts with trigger
+            delete [] upperSpeech;
+            return i;
             }
         }
     

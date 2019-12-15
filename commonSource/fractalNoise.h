@@ -2,10 +2,7 @@
 
 
 // sets seed for all subsequent calls
-// Two 32-bit seeds, for a 64-bit total seed space
-// Second seed defaults to 0.  If 0, seed-response is same as old single-seed
-// version.
-void setXYRandomSeed( uint32_t inSeedA, uint32_t inSeedB = 0 );
+void setXYRandomSeed( uint32_t inSeed );
 
 
 

@@ -622,9 +622,6 @@ void drawSprite( SpriteHandle, doublePair, double, double, char ) {
 void setDrawColor( float, float, float, float ) {
     }
 
-void setDrawColor( FloatColor inColor ) {
-    }
-
 void toggleMultiplicativeBlend( char ) {
     }
 

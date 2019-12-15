@@ -200,8 +200,7 @@ void logDeath( int inPlayerID, char *inPlayerEmail,
         yearsLived -= 14;
         }
 
-    GridPos deathPos = { inMapX, inMapY };
-    cursesLogDeath( inPlayerEmail, yearsLived, deathPos );
+    cursesLogDeath( inPlayerEmail, yearsLived );
 
     recordPlayerLifeStats( inPlayerEmail, inSecPlayed );
     

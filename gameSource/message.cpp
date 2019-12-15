@@ -10,17 +10,6 @@
 
 extern Font *mainFont;
 
-static TextAlignment messageAlign = alignCenter;
-
-void setMessageAlign( TextAlignment inAlign ) {
-    messageAlign = inAlign;
-    }
-
-TextAlignment getMessageAlign() {
-    return messageAlign;
-    }
-
-
 
 void drawMessage( const char *inTranslationKey, doublePair inCenter,
                   char inRed, double inFade ) {
@@ -52,7 +41,7 @@ void drawMessage( const char *inTranslationKey, doublePair inCenter,
             thisMessagePos.y -= i * 30;
                 
             mainFont->drawString( subMessages[i], 
-                                  thisMessagePos, messageAlign );
+                                  thisMessagePos, alignCenter );
                 
             delete [] subMessages[i];
             }
@@ -62,7 +51,7 @@ void drawMessage( const char *inTranslationKey, doublePair inCenter,
     else {
         // just a single message
 
-        mainFont->drawString( inMessage, inCenter, messageAlign );
+        mainFont->drawString( inMessage, inCenter, alignCenter );
         }
 
     }

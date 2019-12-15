@@ -3,7 +3,6 @@
 
 
 #include "minorGems/game/doublePair.h"
-#include "minorGems/game/gameGraphics.h"
 #include "minorGems/util/SimpleVector.h"
 
 
@@ -35,12 +34,6 @@ class Pickable {
 
         virtual char isSearchable() {
             return true;
-            }
-        
-
-        virtual FloatColor getTextColor( void *inObject ) {
-            FloatColor c = { 0, 0, 0, 1 };
-            return c;
             }
         
 

@@ -5,9 +5,6 @@
 
 #include "accountHmac.h"
 
-#include "lifeTokens.h"
-#include "fitnessScore.h"
-
 
 #include "minorGems/game/Font.h"
 #include "minorGems/game/game.h"
@@ -56,7 +53,6 @@ ExistingAccountPage::ExistingAccountPage()
                                       translate( "disableCustomServer" ) ),
           mLoginButton( mainFont, 400, 0, translate( "loginButton" ) ),
           mFriendsButton( mainFont, 400, -80, translate( "friendsButton" ) ),
-          mGenesButton( mainFont, 550, 0, translate( "genesButton" ) ),
           mFamilyTreesButton( mainFont, 400, -160, translate( "familyTrees" ) ),
           mClearAccountButton( mainFont, 400, -280, 
                                translate( "clearAccount" ) ),
@@ -66,8 +62,7 @@ ExistingAccountPage::ExistingAccountPage()
                            translate( "settingsButton" ) ),
           mReviewButton( mainFont, -400, -200, 
                          translate( "postReviewButton" ) ),
-          mRetryButton( mainFont, -100, 198, translate( "retryButton" ) ),
-          mRedetectButton( mainFont, 100, 198, translate( "redetectButton" ) ),
+          mRedetectButton( mainFont, 0, 198, translate( "redetectButton" ) ),
           mViewAccountButton( mainFont, 0, 64, translate( "view" ) ),
           mTutorialButton( mainFont, 522, 300, 
                            translate( "tutorial" ) ),
@@ -94,7 +89,6 @@ ExistingAccountPage::ExistingAccountPage()
 
     setButtonStyle( &mLoginButton );
     setButtonStyle( &mFriendsButton );
-    setButtonStyle( &mGenesButton );
     setButtonStyle( &mFamilyTreesButton );
     setButtonStyle( &mClearAccountButton );
     setButtonStyle( &mCancelButton );
@@ -102,7 +96,6 @@ ExistingAccountPage::ExistingAccountPage()
     setButtonStyle( &mReviewButton );
     setButtonStyle( &mAtSignButton );
     setButtonStyle( &mPasteButton );
-    setButtonStyle( &mRetryButton );
     setButtonStyle( &mRedetectButton );
     setButtonStyle( &mViewAccountButton );
     setButtonStyle( &mTutorialButton );
@@ -115,7 +108,6 @@ ExistingAccountPage::ExistingAccountPage()
     
     addComponent( &mLoginButton );
     addComponent( &mFriendsButton );
-    addComponent( &mGenesButton );
     addComponent( &mFamilyTreesButton );
     addComponent( &mClearAccountButton );
     addComponent( &mCancelButton );
@@ -125,7 +117,6 @@ ExistingAccountPage::ExistingAccountPage()
     addComponent( &mPasteButton );
     addComponent( &mEmailField );
     addComponent( &mKeyField );
-    addComponent( &mRetryButton );
     addComponent( &mRedetectButton );
     addComponent( &mDisableCustomServerButton );
 
@@ -134,7 +125,6 @@ ExistingAccountPage::ExistingAccountPage()
     
     mLoginButton.addActionListener( this );
     mFriendsButton.addActionListener( this );
-    mGenesButton.addActionListener( this );
     mFamilyTreesButton.addActionListener( this );
     mClearAccountButton.addActionListener( this );
     
@@ -145,7 +135,6 @@ ExistingAccountPage::ExistingAccountPage()
     mAtSignButton.addActionListener( this );
     mPasteButton.addActionListener( this );
 
-    mRetryButton.addActionListener( this );
     mRedetectButton.addActionListener( this );
 
     mViewAccountButton.addActionListener( this );
@@ -153,7 +142,6 @@ ExistingAccountPage::ExistingAccountPage()
     
     mDisableCustomServerButton.addActionListener( this );
 
-    mRetryButton.setVisible( false );
     mRedetectButton.setVisible( false );
     mDisableCustomServerButton.setVisible( false );
     
@@ -202,8 +190,6 @@ void ExistingAccountPage::showDisableCustomServerButton( char inShow ) {
 
 void ExistingAccountPage::makeActive( char inFresh ) {
 
-    
-
     if( SettingsManager::getIntSetting( "tutorialDone", 0 ) ) {
         mTutorialButton.setVisible( true );
         }
@@ -215,41 +201,19 @@ void ExistingAccountPage::makeActive( char inFresh ) {
 
     mFramesCounted = 0;
     mPageActiveStartTime = game_getCurrentTime();    
-    
-    // don't re-measure every time we return to this screen
-    // it slows the player down too much
-    // re-measure only at first-startup
-    //mFPSMeasureDone = false;
+    mFPSMeasureDone = false;
     
     mLoginButton.setVisible( false );
     mFriendsButton.setVisible( false );
-    mGenesButton.setVisible( false );
-    
     
     int skipFPSMeasure = SettingsManager::getIntSetting( "skipFPSMeasure", 0 );
     
     if( skipFPSMeasure ) {
         mFPSMeasureDone = true;
-        mRetryButton.setVisible( false );
-        mRedetectButton.setVisible( false );
-        }
-
-    if( mFPSMeasureDone && ! mRetryButton.isVisible() ) {
-        // skipping measure OR we are returning to this page later
-        // and not measuring again
         mLoginButton.setVisible( true );
         mFriendsButton.setVisible( true );
-        triggerLifeTokenUpdate();
-        triggerFitnessScoreUpdate();
         }
-    else if( mFPSMeasureDone && mRetryButton.isVisible() ) {
-        // left screen after failing
-        // need to measure again after returning
-        mRetryButton.setVisible( false );
-        mRedetectButton.setVisible( false );
-        mFPSMeasureDone = false;
-        }
-    
+
 
     int pastSuccess = SettingsManager::getIntSetting( "loginSuccess", 0 );
 
@@ -387,9 +351,6 @@ void ExistingAccountPage::actionPerformed( GUIComponent *inTarget ) {
     else if( inTarget == &mFriendsButton ) {
         processLogin( true, "friends" );
         }
-    else if( inTarget == &mGenesButton ) {
-        setSignal( "genes" );
-        }
     else if( inTarget == &mFamilyTreesButton ) {
         char *url = SettingsManager::getStringSetting( "lineageServerURL", "" );
 
@@ -464,16 +425,6 @@ void ExistingAccountPage::actionPerformed( GUIComponent *inTarget ) {
         mKeyField.setText( clipboardText );
     
         delete [] clipboardText;
-        }
-    else if( inTarget == &mRetryButton ) {
-        mFPSMeasureDone = false;
-        mPageActiveStartTime = game_getCurrentTime();
-        mFramesCounted = 0;
-        
-        mRetryButton.setVisible( false );
-        mRedetectButton.setVisible( false );
-        
-        setStatus( NULL, false );
         }
     else if( inTarget == &mRedetectButton ) {
         SettingsManager::setSetting( "targetFrameRate", -1 );
@@ -615,9 +566,6 @@ void ExistingAccountPage::draw( doublePair inViewCenter,
                 if( pastSuccess ) {
                     mFriendsButton.setVisible( true );
                     }
-                
-                triggerLifeTokenUpdate();
-                triggerFitnessScoreUpdate();
                 }
             else {
                 // show error message
@@ -628,7 +576,6 @@ void ExistingAccountPage::draw( doublePair inViewCenter,
                 delete [] message;
 
                 setStatusPositiion( true );
-                mRetryButton.setVisible( true );
                 mRedetectButton.setVisible( true );
                 }
             
@@ -709,31 +656,5 @@ void ExistingAccountPage::draw( doublePair inViewCenter,
         delete [] s;
         }
     
-
-
-    pos = mEmailField.getPosition();
-    pos.y += 100;
-
-    if( mFPSMeasureDone && 
-        ! mRedetectButton.isVisible() &&
-        ! mDisableCustomServerButton.isVisible() ) {
-        
-        drawTokenMessage( pos );
-        
-        pos = mEmailField.getPosition();
-        
-        pos.x = 
-            ( mTutorialButton.getPosition().x + 
-              mLoginButton.getPosition().x )
-            / 2;
-
-        pos.x -= 32;
-        
-        drawFitnessScore( pos );
-
-        if( isFitnessScoreReady() ) {
-            mGenesButton.setVisible( true );
-            }
-        }
     }
 

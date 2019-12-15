@@ -1,12 +1,4 @@
 #include "minorGems/game/doublePair.h"
-#include "minorGems/game/Font.h"
-
-
-
-// defaults to alignCenter
-void setMessageAlign( TextAlignment inAlign );
-
-TextAlignment getMessageAlign();
 
 
 

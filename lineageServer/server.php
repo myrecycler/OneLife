@@ -353,9 +353,6 @@ function ls_setupDatabase() {
             "INDEX( generation, death_time ),".
             // single index on death_time to speed up queries on just death_time
             "INDEX( death_time ),".
-            // for users with a lot of lives, need to speed up sorting by
-            // death_time per user
-            "INDEX( user_id, death_time ),".
             // -1 if not set yet
             // 0 for Eve
             // the Eve of this family line
@@ -1443,16 +1440,8 @@ function ls_setDeepestGenerationUp( $inID,
             "  $in_deepest_descendant_generation, ".
             "deepest_descendant_life_id = ".
             "  $in_deepest_descendant_life_id, ".
-            // lineage_depth unknown if generation number not known yet
             "lineage_depth = ".
-            "  CASE ".
-            "  WHEN $in_deepest_descendant_generation > 0 ".
-            "       AND generation > 0 ".
-            "  THEN ".
-            "      $in_deepest_descendant_generation - generation ".
-            "  ELSE ".
-            "      0 ".
-            "  END ".
+            "  $in_deepest_descendant_generation - generation ".
             "WHERE id = $inID;";
         
         ls_queryDatabase( $query );
@@ -1555,15 +1544,12 @@ function ls_frontPage() {
             $string_to_hash =
                 ls_requestFilter( "string_to_hash", "/[A-Z0-9]+/i", "0" );
 
-
-            $encodedEmail = urlencode( $emailFilter );
-            
             $correct = false;
             
             global $ticketServerURL;
             $url = "$ticketServerURL".
                 "?action=check_ticket_hash".
-                "&email=$encodedEmail".
+                "&email=$emailFilter".
                 "&hash_value=$ticket_hash".
                 "&string_to_hash=$string_to_hash";
             
@@ -1588,8 +1574,7 @@ function ls_frontPage() {
     $numNameMatches = 0;
 
     $forceIndexClause = "";
-
-    $needUsersTable = false;
+    
     
 
     if( $email_sha1 != "" ) {
@@ -1597,13 +1582,11 @@ function ls_frontPage() {
         $filterClause = " WHERE users.email_sha1 = '$email_sha1' ";
         $filter = "[email hash]";
         $customFilterSet = true;
-        $needUsersTable = true;
         }
     else if( $emailFilter != "" ) {
         $filterClause = " WHERE users.email = '$emailFilter' ";
         $filter = $emailFilter;
         $customFilterSet = true;
-        $needUsersTable = true;
         }
     else if( $nameFilter != "" ) {
         // name filter is used as prefix filter for speed
@@ -1691,8 +1674,7 @@ function ls_frontPage() {
 
     ls_printFrontPageRows( $forceIndexClause,
                            "$filterClause AND age >= 50", "death_time DESC",
-                           $numPerList,
-                           $needUsersTable );
+                           $numPerList );
 
 
     echo "<tr><td colspan=6><font size=5>Today's Deep Roots:".
@@ -1702,8 +1684,7 @@ function ls_frontPage() {
         $forceIndexClause,
         "$rootFilterClause AND death_time >= DATE_SUB( NOW(), INTERVAL 1 DAY )",
         "lineage_depth DESC, death_time DESC",
-        $numPerList,
-        $needUsersTable );
+        $numPerList );
     
     
     echo "<tr><td colspan=6>".
@@ -1712,8 +1693,7 @@ function ls_frontPage() {
     ls_printFrontPageRows( $forceIndexClause,
                            "$filterClause AND age >= 20 AND age < 50",
                            "death_time DESC",
-                           $numPerList,
-                           $needUsersTable );
+                           $numPerList );
 
 
     echo "<tr><td colspan=6>".
@@ -1721,8 +1701,7 @@ function ls_frontPage() {
     
     ls_printFrontPageRows( $forceIndexClause,
                            "$filterClause AND age < 20", "death_time DESC",
-                           $numPerList,
-                           $needUsersTable );
+                           $numPerList );
 
 
     
@@ -1734,8 +1713,7 @@ function ls_frontPage() {
         "$rootFilterClause AND ".
         "death_time >= DATE_SUB( NOW(), INTERVAL 1 WEEK )",
         "lineage_depth DESC, death_time DESC",
-        $numPerList,
-        $needUsersTable );
+        $numPerList );
 
 
     echo "<tr><td colspan=6><font size=5>All Time Deep Roots:".
@@ -1745,8 +1723,7 @@ function ls_frontPage() {
         $forceIndexClause,
         $rootFilterClause,
         "lineage_depth DESC, death_time DESC",
-        $numPerList,
-        $needUsersTable );
+        $numPerList );
 
     
     
@@ -1768,8 +1745,7 @@ function ls_frontPage() {
         $specialForceIndexClause,
         "$filterClause AND death_time >= DATE_SUB( NOW(), INTERVAL 1 DAY )",
         "generation DESC, death_time DESC",
-        $numPerList,
-        $needUsersTable );
+        $numPerList );
     
     
     echo "<tr><td colspan=6><font size=5>This Week's Long Lines:".
@@ -1779,8 +1755,7 @@ function ls_frontPage() {
         $forceIndexClause,
         "$filterClause AND death_time >= DATE_SUB( NOW(), INTERVAL 1 WEEK )",
         "generation DESC, death_time DESC",
-        $numPerList,
-        $needUsersTable );
+        $numPerList );
 
     
 
@@ -1789,8 +1764,7 @@ function ls_frontPage() {
     
     ls_printFrontPageRows( $forceIndexClause,
                            $filterClause, "generation DESC, death_time DESC",
-                           $numPerList,
-                           $needUsersTable );
+                           $numPerList );
 
 
     
@@ -1819,26 +1793,21 @@ function ls_getGrayPercent( $inDeathAgoSec ) {
 
 
 function ls_printFrontPageRows( $inForceIndexClause,
-                                $inFilterClause, $inOrderBy, $inNumRows,
-                                $inNeedUsersTable ) {
+                                $inFilterClause, $inOrderBy, $inNumRows ) {
     global $tableNamePrefix;
     global $photoServerURL, $usePhotoServer;
 
     $startTime = microtime( true );
 
-    $usersTableJoin = "";
-
-    if( $inNeedUsersTable ) {
-        $usersTableJoin =
-            "INNER JOIN $tableNamePrefix"."users as users ".
-            "ON lives.user_id = users.id ";
-        }
-    
     $query = "SELECT lives.id, display_id, player_id, name, ".
-        "age, generation, death_time, deepest_descendant_generation ".
+        "age, generation, death_time, deepest_descendant_generation, ".
+        "servers.server " .
         "FROM $tableNamePrefix"."lives as lives ".
         " $inForceIndexClause ".
-        " $usersTableJoin ".
+        "INNER JOIN $tableNamePrefix"."users as users ".
+        "ON lives.user_id = users.id ".
+        "INNER JOIN $tableNamePrefix"."servers as servers ".
+        "ON lives.server_id = servers.id  ".
         "$inFilterClause ".
         "ORDER BY $inOrderBy ".
         "LIMIT $inNumRows;";
@@ -2314,9 +2283,12 @@ function ls_displayPerson( $inID, $inRelID, $inFullWords ) {
 
     global $tableNamePrefix;
 
-    $query = "SELECT lives.id, display_id, server_id, player_id, name, ".
-        "age, last_words, generation, death_time, death_cause ".
+    $query = "SELECT lives.id, display_id, player_id, name, ".
+        "age, last_words, generation, death_time, death_cause, ".
+        "servers.server " .
         "FROM $tableNamePrefix"."lives as lives ".
+        "INNER JOIN $tableNamePrefix"."servers as servers ".
+        "ON lives.server_id = servers.id  ".
         "WHERE lives.id=$inID;";
     
     $result = ls_queryDatabase( $query );
@@ -2378,8 +2350,8 @@ function ls_displayPerson( $inID, $inRelID, $inFullWords ) {
 
         if( $usePhotoServer ) {
             // now real photo link to right of face
-            $serverName = ls_mysqli_result( $result, 0, "server" );
-            $player_id = ls_mysqli_result( $result, 0, "player_id" );
+            $serverName = ls_mysqli_result( $result, $i, "server" );
+            $player_id = ls_mysqli_result( $result, $i, "player_id" );
             
             $imageURL =
                 $photoServerURL .
@@ -2457,17 +2429,6 @@ function ls_displayPerson( $inID, $inRelID, $inFullWords ) {
         if( $last_words != "" ) {
             echo "<br>\n";
             echo "Final words: \"$last_words\"\n";
-            }
-
-        if( $generation == 1 ) {
-            // show link to full tree on Wondible server
-            $serverID = ls_mysqli_result( $result, 0, "server_id" );
-            $player_id = ls_mysqli_result( $result, 0, "player_id" );
-            
-            $url = "https://wondible.com/ohol-family-trees/#".
-                "server_id=$serverID&epoch=2&playerid=$player_id";
-
-            echo "<br>[<a href='$url'>Full Tree</a>]\n";
             }
         }
     
@@ -2613,7 +2574,7 @@ function ls_getDeathHTML( $inID, $inRelID ) {
                         if( $commentPos != FALSE ) {
                             $line = substr( $line, 0, $commentPos );
                             }
-                        $line = trim( $line );
+
                         $deathString = "Killed by $line";
                         }
                     }
@@ -2690,16 +2651,7 @@ function ls_computeDeepestGeneration( $inID ) {
             "SET ".
             "deepest_descendant_generation = $deepest_descendant_generation, ".
             "deepest_descendant_life_id = $deepest_descendant_life_id, ".
-            // lineage_depth unknown if generation number not known yet
-            "lineage_depth = ".
-            "  CASE ".
-            "  WHEN $deepest_descendant_generation > 0 ".
-            "       AND generation > 0 ".
-            "  THEN ".
-            "      $deepest_descendant_generation - generation ".
-            "  ELSE ".
-            "      0 ".
-            "  END ".
+            "lineage_depth = $deepest_descendant_generation - generation ".
             "WHERE id = $inID;";
         
         ls_queryDatabase( $query );  

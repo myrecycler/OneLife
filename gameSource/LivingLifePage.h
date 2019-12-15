@@ -56,9 +56,6 @@ typedef struct LiveObject {
         
         SimpleVector<int> lineage;
         
-        int lineageEveID;
-        
-
         char outOfRange;
         char dying;
         char sick;
@@ -67,12 +64,6 @@ typedef struct LiveObject {
 
         char *relationName;
         
-        // -1 war
-        // 0 neutral
-        // 1 peace
-        int warPeaceStatus;
-        
-
         int curseLevel;
         
         int excessCursePoints;
@@ -112,6 +103,11 @@ typedef struct LiveObject {
         char lastHeldByRawPosSet;
         doublePair lastHeldByRawPos;
         
+        // track this so that we only send one jump message even if
+        // the player clicks more than once before the server registers the
+        // jump
+        double jumpOutOfArmsSentTime;
+        
         // true if locally-controlled baby is attempting to jump out of arms
         char babyWiggle;
         double babyWiggleProgress;
@@ -128,10 +124,6 @@ typedef struct LiveObject {
         int lastHoldingID;
 
         char holdingFlip;
-        
-        // if not learned, held flipped 180 degrees
-        char heldLearned;
-
 
         char heldPosOverride;
         char heldPosOverrideAlmostOver;
@@ -174,8 +166,6 @@ typedef struct LiveObject {
         
 
         float heat;
-        float foodDrainTime;
-        float indoorBonusTime;
         
 
         int numContained;
@@ -309,52 +299,8 @@ typedef struct LiveObject {
         // wall clock time when emot clears
         double emotClearETATime;
 
-        SimpleVector<Emotion*> permanentEmots;
-        
-
         char killMode;
         int killWithID;
-        
-        char chasingUs;
-        
-
-
-        // id of who this player is following, or -1 if following self
-        int followingID;
-        
-        int highestLeaderID;
-
-        // list of other players who have exiled this player
-        SimpleVector<int> exiledByIDs;
-        
-        // how many tiers of people are below this person
-        // 0 if has no followers
-        // 1 if has some followers
-        // 2 if has some leaders as followers
-        // 3 if has some leader-leaders as followers
-        int leadershipLevel;
-        
-        char hasBadge;
-        // color to draw badge
-        FloatColor badgeColor;
-
-        FloatColor personalLeadershipColor;
-        
-
-        // does the local player see this person as exiled?
-        char isExiled;
-
-        // does the local player see this person as dubious?
-        // if they are following someone we see as exiled
-        char isDubious;
-        
-
-        // does local player see this person as a follower?
-        char followingUs;
-        
-        // for mouse over, what this local player sees
-        // in front of this player's name
-        char *leadershipNameTag;
 
     } LiveObject;
 
@@ -419,7 +365,6 @@ typedef struct PointerHitRecord {
         // true if hitOurPlacement happened THROUGH another non-person object
         char hitOurPlacementBehind;
         
-        int hitObjectID;
 
     } PointerHitRecord;
 
@@ -468,13 +413,6 @@ typedef struct ExtraMapObject {
     } ExtraMapObject;
         
         
-
-
-typedef struct OldHintArrow {
-        doublePair pos;
-        double bounce;
-        float fade;
-    } OldHintArrow;
 
 
 
@@ -542,11 +480,6 @@ class LivingLifePage : public GamePage, public ActionListener {
 
         char mForceRunTutorial;
         int mTutorialNumber;
-
-        char mGlobalMessageShowing;
-        double mGlobalMessageStartTime;
-        SimpleVector<char*>mGlobalMessagesToDestroy;
-        
 
         int mFirstServerMessagesReceived;
         
@@ -667,23 +600,17 @@ class LivingLifePage : public GamePage, public ActionListener {
         SpriteHandle mCellBorderSprite;
         SpriteHandle mCellFillSprite;
         
-        SpriteHandle mHintArrowSprite;
-        
 
         SpriteHandle mHomeSlipSprite;
-        SpriteHandle mHomeSlip2Sprite;
-        
-        SpriteHandle mHomeSlipSprites[2];
-        
         SpriteHandle mHomeArrowSprites[ NUM_HOME_ARROWS ];
         SpriteHandle mHomeArrowErasedSprites[ NUM_HOME_ARROWS ];
         
-        HomeArrow mHomeArrowStates[2][ NUM_HOME_ARROWS ];
+        HomeArrow mHomeArrowStates[ NUM_HOME_ARROWS ];
 
         SimpleVector<int> mCulvertStoneSpriteIDs;
         
-        SimpleVector<char*> mPreviousHomeDistStrings[2];
-        SimpleVector<float> mPreviousHomeDistFades[2];
+        SimpleVector<char*> mPreviousHomeDistStrings;
+        SimpleVector<float> mPreviousHomeDistFades;
         
 
         // offset from current view center
@@ -692,11 +619,9 @@ class LivingLifePage : public GamePage, public ActionListener {
         doublePair mNotePaperPosTargetOffset;
 
 
-        doublePair mHomeSlipHideOffset[2];
-        doublePair mHomeSlipPosOffset[2];
-        doublePair mHomeSlipPosTargetOffset[2];
-
-        double mHomeSlipShowDelta[2];
+        doublePair mHomeSlipHideOffset;
+        doublePair mHomeSlipPosOffset;
+        doublePair mHomeSlipPosTargetOffset;
 
         
         SimpleVector<char*> mLastKnownNoteLines;
@@ -763,15 +688,6 @@ class LivingLifePage : public GamePage, public ActionListener {
         int mNextHintObjectID;
         int mNextHintIndex;
 
-        int mCurrentHintTargetObject[2];
-
-        double mCurrentHintTargetPointerBounce[2];
-        float mCurrentHintTargetPointerFade[2];
-        doublePair mLastHintTargetPos[2];
-
-        SimpleVector<OldHintArrow> mOldHintArrows;
-
-
         SimpleVector<TransRecord *> mLastHintSortedList;
         int mLastHintSortedSourceID;
         char *mLastHintFilterString;
@@ -785,14 +701,10 @@ class LivingLifePage : public GamePage, public ActionListener {
         
 
         int getNumHints( int inObjectID );
-        
-        // inDoNotPointAtThis specifies an object that we should never
-        // add a visual pointer to (like what we are holding)
-        char *getHintMessage( int inObjectID, int inIndex,
-                              int inDoNotPointAtThis = -1 );
+        char *getHintMessage( int inObjectID, int inIndex );
 
         char *mHintFilterString;
-        char mHintFilterStringNoMatch;
+        
 
         
         // offset from current view center
@@ -811,10 +723,6 @@ class LivingLifePage : public GamePage, public ActionListener {
         int mLiveTutorialTriggerNumber;
 
 
-
-        // relative to map corner, but not necessary in bounds
-        // of locally stored map
-        GridPos getMapPos( int inWorldX, int inWorldY );
 
         // -1 if outside bounds of locally stored map
         int getMapIndex( int inWorldX, int inWorldY );
@@ -862,8 +770,6 @@ class LivingLifePage : public GamePage, public ActionListener {
         // the object that we're mousing over
         int mLastMouseOverID;
         int mCurMouseOverID;
-        int mCurMouseOverBiome;
-        
         float mCurMouseOverFade;
         
         GridPos mCurMouseOverSpot;
@@ -940,14 +846,8 @@ class LivingLifePage : public GamePage, public ActionListener {
                                         double inFade,
                                         double inMaxWidth,
                                         LiveObject *inSpeaker = NULL,
-                                        int inForceMinChalkBlots = -1,
-                                        FloatColor *inForceBlotColor = NULL,
-                                        FloatColor *inForceTextColor = NULL );
+                                        int inForceMinChalkBlots = -1 );
         
-        
-        void drawOffScreenSounds();
-        
-
 
         // returns an animation pack that can be used to draw the
         // held object.  The pack's object ID is -1 if nothing is held
@@ -992,9 +892,7 @@ class LivingLifePage : public GamePage, public ActionListener {
         char mShowHighlights;
 
 
-        // inSourcePlayerID -1 if animation not connected to a player
-        void handleAnimSound( int inSourcePlayerID, 
-                              int inObjectID, double inAge, 
+        void handleAnimSound( int inObjectID, double inAge, 
                               AnimType inType,
                               int inOldFrameCount, int inNewFrameCount,
                               double inPosX, double inPosY );
@@ -1015,8 +913,6 @@ class LivingLifePage : public GamePage, public ActionListener {
 
         char mUsingSteam;
         char mZKeyDown;
-        
-        char mXKeyDown;
 
         char mPlayerInFlight;
 
@@ -1039,32 +935,6 @@ class LivingLifePage : public GamePage, public ActionListener {
         // AGEMOD NOTE:  Change 1/1 - Take these changes during the merge process
         void agePanel( LiveObject* ourLiveObject, char displayPanel = true );
 
-
-        void pushOldHintArrow( int inIndex );
-
-
-        char isHintFilterStringInvalid();
-        
-        
-
-        SimpleVector<int> mBadBiomeIndices;
-        
-        SimpleVector<char*> mBadBiomeNames;
-    
-        char isBadBiome( int inMapI );
-
-        void drawHomeSlip( doublePair inSlipPos, int inIndex = 0 );
-        
-
-        void updateLeadership();
-        
-
-        // 0 for normal
-        // 1 for half x
-        // 2 for full x
-        SimpleVector<int> mLeadershipBadges[3];
-
-        int mFullXObjectID;
 
     };
 

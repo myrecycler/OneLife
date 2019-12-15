@@ -17,21 +17,6 @@ void setDrawColor( FloatRGB inColor );
 
 
 
-// tracks when creation of an object taps out nearby objects on a grid
-typedef struct TapoutRecord {
-        int triggerID;
-        int gridSpacingX, gridSpacingY;
-        // how far to reach in +/- x and y when tapping out
-        int limitX, limitY;
-        int buildCount;
-        int buildCountLimit;
-        // how far to reach in +/- x and y when tapping out
-        // after build count limit reached
-        int postBuildLimitX, postBuildLimitY;
-    } TapoutRecord;
-    
-
-
 typedef struct ObjectRecord {
         int id;
         
@@ -64,9 +49,6 @@ typedef struct ObjectRecord {
 
         // age you have to be to to pick something up
         int minPickupAge;
-        
-        // if you're > this age, you cannot pick up this object
-        int maxPickupAge;
         
 
         // true for smaller objects that have heldOffsets relative to
@@ -153,15 +135,6 @@ typedef struct ObjectRecord {
         // them
         char floorHugging;
         
-        // for non floor-hugging objects that are still in wall layer
-        // marked in object description with +wall
-        // floorHugging objects automatically get wallLayer set to true
-        char wallLayer;
-        
-        // true if in wall layer, but drawn in front of other walls
-        char frontWall;
-        
-
         
         int foodValue;
         
@@ -273,8 +246,6 @@ typedef struct ObjectRecord {
         
         char *spriteBehindSlots;
         
-        char *spriteInvisibleWhenContained;
-        
         
         // flags for sprites that are special body parts
         char *spriteIsHead;
@@ -331,11 +302,6 @@ typedef struct ObjectRecord {
         
         int useDummyParent;
         
-        // which use dummy index, of parent, this is
-        // indexes in parent's useDummyIDs array
-        int thisUseDummyIndex;
-
-        
         // -1 if not set
         // used to avoid recomputing height repeatedly at client/server runtime
         int cachedHeight;
@@ -356,11 +322,6 @@ typedef struct ObjectRecord {
         
         char isVariableDummy;
         int variableDummyParent;
-
-        // which variable dummy index, of parent, this is
-        // indexes in parent's variableDummyIDs array
-        int thisVariableDummyIndex;
-
 
         char isVariableHidden;
 
@@ -387,33 +348,6 @@ typedef struct ObjectRecord {
         char isFlightLanding;
         
         char isOwned;
-        
-        char noHighlight;
-        
-        // for auto-orienting fences, walls, etc
-        // all three objects know the IDs of all three objects
-        char isAutoOrienting;
-        int horizontalVersionID;
-        int verticalVersionID;
-        int cornerVersionID;
-        
-
-        char isTapOutTrigger;
-
-        int toolSetIndex;
-        char toolLearned;
-
-        
-        char isBiomeLimited;
-        int maxBiomeMapEntry;
-        // one entry per biome
-        char *permittedBiomeMap;
-        
-        char autoDefaultTrans;
-
-        char noBackAccess;
-
-        int alcohol;
 
     } ObjectRecord;
 
@@ -501,8 +435,7 @@ int reAddObject( ObjectRecord *inObject,
 
 
 
-// if inID doesn't exist, returns default object, unless inNoDefault is set
-ObjectRecord *getObject( int inID, char inNoDefault = false );
+ObjectRecord *getObject( int inID );
 
 
 // return array destroyed by caller, NULL if none found
@@ -568,7 +501,6 @@ int addObject( const char *inDescription,
                char *inSpriteInvisibleWhenHolding,
                int *inSpriteInvisibleWhenWorn,
                char *inSpriteBehindSlots,
-               char *inSpriteInvisibleWhenContained,
                char *inSpriteIsHead,
                char *inSpriteIsBody,
                char *inSpriteIsBackFoot,
@@ -594,12 +526,6 @@ typedef struct HoldingPos {
 // (can be used to draw lower layers only)
 // Defaults to -1 and resets to -1 after every call (draw all layers)
 void setObjectDrawLayerCutoff( int inCutoff );
-
-
-// the next objects drawn will be in their contained mode
-// (layers hidden when contained will be skipped)
-void setDrawnObjectContained( char inContained );
-
 
 
 
@@ -682,8 +608,7 @@ int getRandomPersonObjectOfRace( int inRace );
 
 // gets a family member near inMotherID with max distance away in family
 // spectrum 
-int getRandomFamilyMember( int inRace, int inMotherID, int inFamilySpan,
-                           char inForceGirl = false );
+int getRandomFamilyMember( int inRace, int inMotherID, int inFamilySpan );
 
 
 
@@ -848,11 +773,6 @@ void setupSpriteUseVis( ObjectRecord *inObject, int inUsesRemaining,
 char bothSameUseParent( int inAObjectID, int inBObjectID );
 
 
-// if this ID is a use dummy, gets the parent object ID
-int getObjectParent( int inObjectID );
-
-
-
 
 // processes object ID for client consumption
 // hiding hidden variable object ids behind parent ID
@@ -879,46 +799,6 @@ int getMaxSpeechPipeIndex();
 int getNumGlobalTriggers();
 
 int getMetaTriggerObject( int inTriggerIndex );
-
-
-
-// can a player of this age pick up a given object?
-char canPickup( int inObjectID, double inPlayerAge );
-
-
-
-
-SimpleVector<int> findObjectsMatchingWords( char *inWords, 
-                                            int inIgnoreObjectID,
-                                            int inLimit,
-                                            int *outNumFilterHits );
-
-
-// terminates string to remove comment
-void stripDescriptionComment( char *inString );
-
-
-
-TapoutRecord *getTapoutRecord( int inObjectID );
-
-
-void clearTapoutCounts();
-
-
-void clearToolLearnedStatus();
-
-
-// gets object IDs that belong to a tool set
-void getToolSetMembership( int inToolSetIndex, 
-                           SimpleVector<int> *outListToFill );
-
-
-// gets indices of all tool sets
-void getAllToolSets( SimpleVector<int> *outListToFill );
-
-
-
-char canBuildInBiome( ObjectRecord *inObj, int inTargetBiome );
 
 
 
