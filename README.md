@@ -1,3 +1,9 @@
+==========Abandoned because build failed==========
+==========因为某些原因构建失败所以遗弃了========
+new repo here https://github.com/cnwillz/OneLife
+
+
+
 # OneLife
 A version of OHOL supporting multibyte characters and other useful modifications like fov  scaling, quick key for emotion and type. And a server support several useful commands.
 This repositorya is merged from branch by Awbz and Jason, thanks for their work.
